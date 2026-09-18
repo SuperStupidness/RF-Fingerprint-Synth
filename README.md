@@ -1,14 +1,10 @@
 # Synthetic RF-fingerprinting dataset generator
 
 Generates synthetic SRRC-QPSK captures in the SigMF layout, from device
-profiles measured on real hardware. Every impairment in the chain is fitted or
-measured from captures of 23 USRP B210 transmitters recorded on a Signal Hound
-BB60C — none are invented — and each synthetic run redraws the quantities that
+profiles measured on real hardware. Every impairment in the chain is fitted or measured from captures of 23 USRP B210 transmitters recorded on a Signal Hound BB60C and each synthetic run redraws the quantities that
 genuinely vary run to run, leaving the device-fixed ones alone.
 
-The output is written in the same directory layout the real capture pipeline
-produces, so the same characterisation code reads real and synthetic data
-unchanged.
+The output is written in the same directory layout the real capture pipeline produces, so the same characterisation code reads real and synthetic data unchanged.
 
 ## Install
 
@@ -44,11 +40,7 @@ anything in the measured set.
 **`estimators.ipynb`** — the other direction: recovering the impairment
 parameters from a capture. These are the estimators the measured profiles
 themselves were built with — burst detection and alignment, carrier offset,
-sampling clock, the joint ISI/PA least squares, IQ imbalance, the thermal and
-phase-noise split, and LO leakage. Each is run on generated data and scored
-against the values `synth_run` injected, which is the only check that catches a
-convention error: two of the estimators here report the opposite sign to the
-injector, and one returns a number that is purely its own noise floor.
+sampling clock, the joint ISI/PA least squares, IQ imbalance, the thermal and phase-noise split, and LO leakage. Each is run on generated data and scored against the values `synth_run` injected, which is the only check that catches a convention error: two of the estimators here report the opposite sign to the injector, and one returns a number that is purely its own noise floor.
 
 ## Quickstart
 
@@ -156,13 +148,10 @@ file and must stay there in any redistribution.
 ## Acknowledgement
 
 Claude (Anthropic) was used throughout this project to assist with coding,
-analysis and documentation. The measurements, the modelling decisions and the
-validation are the authors'.
+analysis and documentation. The measurements, the modelling decisions and the validation are the authors'.
 
 ## Provenance
 
 `radio_characterisation.json` is the measured per-run log for 23 radios × 6
 configurations × 100 runs. `isi_taps.json` carries the fitted blocks, each
-entry paired with the ripple FIR it was fitted against — the generator refuses
-to run if a ripple curve is in scope but the paired fit is missing, because
-injecting one without the other double-counts the band shape.
+entry paired with the ripple FIR it was fitted against — the generator refuses to run if a ripple curve is in scope but the paired fit is missing, because injecting one without the other double-counts the band shape.
