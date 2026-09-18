@@ -2,6 +2,8 @@
 
 Generates synthetic SRRC-QPSK captures in SigMF format based on measured profiles from 23 real USRP B210 transmitters. 
 
+We are trying to find a solution to store the full dataset. For now here are some samples. Sample dataset link: https://drive.google.com/drive/folders/1A3LalT3Ojt_YU07PwynkjhlF8aStcJZV?usp=sharing.
+
 The generator applies hardware impairments (fitted from real captures) and redraws run-specific variations while keeping device-specific traits fixed. Outputs match real capture directory layouts, allowing your characterization code to read real and synthetic data interchangeably.
 
 ## Install
