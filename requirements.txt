@@ -1,0 +1,6 @@
+numpy>=1.24
+scipy>=1.10
+
+# getting_started.ipynb only
+matplotlib>=3.6
+notebook>=7.0

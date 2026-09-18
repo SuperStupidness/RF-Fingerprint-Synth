@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# generator output
+out/
+*.sigmf-data
+*.sigmf-meta
+ground_truth.json
+profile.json
+
+# local caches / scratch
+*.npz
+*.bak
+.DS_Store
+.vscode/
+
+# notebook scratch output
+notebook_out/
+
+# notebook scratch
+my_radio.json
