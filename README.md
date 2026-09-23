@@ -16,11 +16,12 @@ Requires Python 3.10+ (tested on 3.13.5). The core generator uses only `numpy` a
 
 ## Tutorials
 
-Three Jupyter notebooks guide you through the system:
+Four Jupyter notebooks guide you through the system:
 
 1. **`getting_started.ipynb`** — Run the generator using real hardware profiles. Covers loading profiles, splitting fixed vs. varying parameters, plotting constellations, and saving datasets. (Runs in < 1 minute).
 2. **`build_your_own_radio.ipynb`** — Create custom transmitters from scratch. Ideal for parameter sweeps, controlled fleets, testing extreme impairments, and verifying estimators.
-3. **`estimators.ipynb`** — The reverse process. Runs estimators on synthetic data to recover impairment parameters, scoring them against the injected ground truth to verify accuracy.
+3. **`paper_figures.ipynb`** — Reproduce the paper's measurement figures: the radio population across all 23 transmitters, the July-vs-August cross-session replication, the per-run input distributions for a representative device, and the fitted-blocks fidelity check. Runs in under a minute.
+4. **`estimators.ipynb`** — The reverse process. Runs estimators on synthetic data to recover impairment parameters, scoring them against the injected ground truth to verify accuracy.
 
 ## Quickstart
 
@@ -60,6 +61,8 @@ Parameters are sourced from specific files:
 | `radio_characterisation.json` | Per-run measurements (CFO, clock, IQ, LO leakage, SNR) defining centers and spreads. |
 | `srrc_ripple_per_config.json` | Common-mode SRRC band ripple (one FIR per config). |
 | `bb60_rx_fir_5msps_n10.npy` | Measured BB60C anti-alias response. |
+| `repeat_log.json` | August re-capture of the same fleet, used by the cross-session figure. |
+| `fitted_blocks_30BF779_89_433.npz` | Extracted per-symbol deviations, real and synthetic, for the fidelity figure (the raw captures it came from are not shipped). |
 
 ## Variation Kinds
 

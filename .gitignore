@@ -12,6 +12,10 @@ profile.json
 
 # local caches / scratch
 *.npz
+# ...but the packaged deviation arrays ARE part of the repository: the
+# fidelity figure cannot be reproduced without them, and the captures
+# they were extracted from are not shipped.
+!fitted_blocks_*.npz
 *.bak
 .DS_Store
 .vscode/
