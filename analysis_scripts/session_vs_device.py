@@ -37,8 +37,8 @@ import os as _os
 import numpy as np
 
 BASE = Path(__file__).resolve().parent.parent
-ORIG = BASE / "radio_characterisation.json"
-REP = BASE / "repeat_log.json"
+ORIG = BASE / "data" / "radio_characterisation.json"
+REP = BASE / "data" / "repeat_log.json"
 NPERM = 2000
 CONFIGS = ["g77_433", "g77_915", "g77_2400", "g89_433", "g89_915", "g89_2400"]
 
@@ -89,33 +89,19 @@ BAD_JULY_SESSIONS = {"172217",   # 30EAE27, 2400.0/433.0
 MIN_GAP_DAYS = int(_os.environ.get("SG_MIN_GAP_DAYS", "20"))
 
 
-# CAPTURE DATES, BAKED IN. The originals live in the sweep DIRECTORY NAMES on
-# the capture drive (the logs carry no timestamp), which is not shipped with
-# this repository -- so the dates are recorded here instead. Format is
-#   radio: (july capture, august re-capture)
-# and the four bad-carrier July sessions are already excluded, which is why
-# 30EAE27 and 30ECB6B are absent: neither has a usable July baseline.
+# CAPTURE DATES, BAKED IN -- the originals live in the sweep DIRECTORY NAMES on
+# the capture drive, which is not shipped with this repository.
 CAPTURE_DATES = {
-    "30BF779": ("20260729", "20260818"),
-    "30BF795": ("20260803", "20260818"),
-    "30BF796": ("20260728", "20260818"),
-    "30BF7A4": ("20260724", "20260819"),
-    "30BF7AB": ("20260724", "20260819"),
-    "30BF7B6": ("20260724", "20260821"),
-    "30BF7BE": ("20260728", "20260819"),
-    "30BF7C1": ("20260803", "20260819"),
-    "30EAE34": ("20260803", "20260819"),
-    "30EAE54": ("20260818", "20260820"),
-    "30EAE76": ("20260727", "20260821"),
-    "30ECB66": ("20260727", "20260820"),
-    "30ECB67": ("20260727", "20260821"),
-    "30ECB71": ("20260803", "20260820"),
-    "30ECB80": ("20260724", "20260819"),
-    "30ECB81": ("20260724", "20260820"),
-    "30ECB84": ("20260803", "20260821"),
-    "30ECBAD": ("20260819", "20260820"),
-    "30ECBBC": ("20260724", "20260821"),
-    "30ECBC5": ("20260727", "20260820"),
+    "30BF779": ("20260729", "20260818"), "30BF795": ("20260803", "20260818"),
+    "30BF796": ("20260728", "20260818"), "30BF7A4": ("20260724", "20260819"),
+    "30BF7AB": ("20260724", "20260819"), "30BF7B6": ("20260724", "20260821"),
+    "30BF7BE": ("20260728", "20260819"), "30BF7C1": ("20260803", "20260819"),
+    "30EAE34": ("20260803", "20260819"), "30EAE54": ("20260818", "20260820"),
+    "30EAE76": ("20260727", "20260821"), "30ECB66": ("20260727", "20260820"),
+    "30ECB67": ("20260727", "20260821"), "30ECB71": ("20260803", "20260820"),
+    "30ECB80": ("20260724", "20260819"), "30ECB81": ("20260724", "20260820"),
+    "30ECB84": ("20260803", "20260821"), "30ECBAD": ("20260819", "20260820"),
+    "30ECBBC": ("20260724", "20260821"), "30ECBC5": ("20260727", "20260820"),
 }
 
 

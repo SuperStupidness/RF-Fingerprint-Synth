@@ -10,6 +10,8 @@ import json, re, sys
 from collections import defaultdict
 from pathlib import Path
 
+BASE = Path(__file__).resolve().parent.parent
+
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -29,7 +31,7 @@ BAD_JULY_SESSIONS = {"172217",   # 30EAE27
                      "181829",   # 30ECB6B
                      "193436"}   # 30ECBAD
 
-d = json.loads(Path("radio_characterisation.json").read_text())
+d = json.loads((BASE / "data" / "radio_characterisation.json").read_text())
 groups = defaultdict(list)
 _sess_re = re.compile(r"^TX\w+_RXBB60_(\d+)/g")
 for k, v in d.items():
@@ -235,7 +237,8 @@ for gi, g in enumerate(GAINS):
 plt.suptitle(f"Radio population (bars) — {len(order)} radios, faceted by gain "
              f"(error bars = run-to-run std)", fontsize=14)
 plt.tight_layout()
-out = Path("figures") / (f"A4s_radio_population_bars"
+(BASE / "figures").mkdir(exist_ok=True)
+out = BASE / "figures" / (f"A4s_radio_population_bars"
                          f"{'' if _sel == 'all' else '_core'}.png")
 plt.savefig(out, dpi=120, bbox_inches="tight")
 print("saved ->", out)

@@ -32,7 +32,7 @@ BASE = Path(__file__).resolve().parent.parent
 RAD = sys.argv[1] if len(sys.argv) > 1 else "30BF779"
 CFG = sys.argv[2] if len(sys.argv) > 2 else "89_433"
 
-src = BASE / f"fitted_blocks_{RAD}_{CFG}.npz"
+src = BASE / "data" / f"fitted_blocks_{RAD}_{CFG}.npz"
 if not src.exists():
     raise SystemExit(f"{src.name} not found -- this figure needs the packaged "
                      f"deviation arrays, which ship only for 30BF779 / 89_433")

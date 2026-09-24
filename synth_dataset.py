@@ -52,6 +52,9 @@ import numpy as np
 import scipy.signal
 
 BASE = Path(__file__).resolve().parent
+# Packaged measurement and fit inputs. Kept in one folder so the
+# repository root shows the notebooks rather than a wall of data files.
+DATA = BASE / "data"
 import sys
 sys.path.insert(0, str(BASE))
 sys.path.insert(0, str(BASE / "PA_modelling_with_GMP"))
@@ -195,7 +198,7 @@ RX_STOP_DB = 80.0          # UNUSED
 # i.e. 5.7 dB shallow. Two different depths and two different offsets landing
 # near the same fitted value: a shared geometry effect, NOT two independent
 # recoveries of a hardware constant. Do not report it as agreement.
-RX_FIR = np.load(BASE / "bb60_rx_fir_5msps_n10.npy")
+RX_FIR = np.load(DATA / "bb60_rx_fir_5msps_n10.npy")
 # post-filter noise floor, dB relative to the in-band noise power
 RX_FLOOR_DBC = -45.0
 CHUNK_SAMPLES = 250000       # the real BB60 writer's annotation chunk
@@ -219,7 +222,7 @@ PREAMBLE = np.exp(-1j * np.pi * _ZC_ROOT * _zc_n * _zc_n / _ZC_N)
 SRRC = srrc_design(SPS, SPAN, BETA)
 MF_DELAY = len(SRRC) // 2
 
-LOG = BASE / "radio_characterisation.json"
+LOG = DATA / "radio_characterisation.json"
 TAPS = None      # set below from SG_TAPS_FILE
 
 # ── optional RUN SUBSET / alternate taps file ────────────────────────────────
@@ -239,7 +242,7 @@ def _sg_subset():
 
 def _sg_taps_path(base):
     import os
-    return Path(os.environ.get("SG_TAPS_FILE", str(base / "isi_taps.json")))
+    return Path(os.environ.get("SG_TAPS_FILE", str(base / "data" / "isi_taps.json")))
 
 TAPS = _sg_taps_path(BASE)
 
@@ -272,7 +275,7 @@ TAPS = _sg_taps_path(BASE)
 # session than the shape was measured on, where using it would mix sessions).
 import os as _os_sh
 SHAPE_FILE = Path(_os_sh.environ.get("SG_SHAPE_FILE",
-                  str(BASE / "srrc_settling_shape_for_generator.json")))
+                  str(DATA / "srrc_settling_shape_for_generator.json")))
 # The format this loader was written against. Bump ONLY after re-reading the
 # file and re-verifying the routing, because the failure mode of a format change
 # is silent: v1 carried the scope as free text in convention.config, v2 moved it
@@ -294,7 +297,7 @@ SHAPE_FORMAT = 4
 # must also have a 'ripple_fit' block, and it raises if it does not -- the same
 # pairing guard the measured settling shape uses, for the same reason.
 RIPPLE_FILE = Path(_os_sh.environ.get(
-    "SG_RIPPLE_FILE", str(BASE / "srrc_ripple_per_config.json")))
+    "SG_RIPPLE_FILE", str(DATA / "srrc_ripple_per_config.json")))
 RIPPLE_FORMAT = 1
 
 

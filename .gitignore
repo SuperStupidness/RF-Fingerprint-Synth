@@ -16,6 +16,8 @@ profile.json
 # fidelity figure cannot be reproduced without them, and the captures
 # they were extracted from are not shipped.
 !fitted_blocks_*.npz
+# same reasoning for the OFDM reconstruction figure
+!wifi_recon_*.npz
 *.bak
 .DS_Store
 .vscode/

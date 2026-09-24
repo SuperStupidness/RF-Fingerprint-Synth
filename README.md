@@ -16,12 +16,25 @@ Requires Python 3.10+ (tested on 3.13.5). The core generator uses only `numpy` a
 
 ## Tutorials
 
-Four Jupyter notebooks guide you through the system:
+Five Jupyter notebooks guide you through the system:
 
 1. **`getting_started.ipynb`** — Run the generator using real hardware profiles. Covers loading profiles, splitting fixed vs. varying parameters, plotting constellations, and saving datasets. (Runs in < 1 minute).
 2. **`build_your_own_radio.ipynb`** — Create custom transmitters from scratch. Ideal for parameter sweeps, controlled fleets, testing extreme impairments, and verifying estimators.
 3. **`paper_figures.ipynb`** — Reproduce the paper's measurement figures: the radio population across all 23 transmitters, the July-vs-August cross-session replication, the per-run input distributions for a representative device, and the fitted-blocks fidelity check. Runs in under a minute.
 4. **`estimators.ipynb`** — The reverse process. Runs estimators on synthetic data to recover impairment parameters, scoring them against the injected ground truth to verify accuracy.
+5. **`wifi_reconstruction.ipynb`** — Rebuilds a *real* 802.11g capture from its transmitted waveform plus fitted impairments, block by block, and scores the rebuild against the measured receiver output. The deterministic part reproduces the stored model bit for bit. This is the measurement side rather than the generator: parameters here were fitted from one capture, not sampled from a distribution.
+
+### Standalone figure scripts
+
+`analysis_scripts/` holds the figure scripts the notebooks call, each runnable on its own. One is not covered by the notebooks:
+
+```bash
+python analysis_scripts/fig_wifi_reconstruction.py     # -> figures/27_wifi_recon.png / .pdf
+```
+
+This is the 802.11g OFDM reconstruction against a real capture — PSD, time domain and constellation, each beside its error. It reads `data/wifi_recon_30BF795_89_2400.npz`, packaged here because the captures it came from are not shipped, and demodulates through the validated receiver in `analysis_scripts/wifi_ofdm.py` (L-LTF detect, LTS channel estimate, zero-forcing equalise, pilot common-phase tracking; cross-checked against the MATLAB WLAN Toolbox to ~1e-8).
+
+Note this figure is about the OFDM **reconstruction chain**, not the SRRC generator that the rest of the repository builds — the two share the impairment model but not the waveform.
 
 ## Quickstart
 
@@ -57,12 +70,12 @@ Parameters are sourced from specific files:
 
 | Source File | What It Controls |
 | :--- | :--- |
-| `isi_taps.json` | ISI taps, PA cubic, burst transient, phase-noise mask (fitted per radio/config via least squares). |
-| `radio_characterisation.json` | Per-run measurements (CFO, clock, IQ, LO leakage, SNR) defining centers and spreads. |
-| `srrc_ripple_per_config.json` | Common-mode SRRC band ripple (one FIR per config). |
-| `bb60_rx_fir_5msps_n10.npy` | Measured BB60C anti-alias response. |
-| `repeat_log.json` | August re-capture of the same fleet, used by the cross-session figure. |
-| `fitted_blocks_30BF779_89_433.npz` | Extracted per-symbol deviations, real and synthetic, for the fidelity figure (the raw captures it came from are not shipped). |
+| `data/isi_taps.json` | ISI taps, PA cubic, burst transient, phase-noise mask (fitted per radio/config via least squares). |
+| `data/radio_characterisation.json` | Per-run measurements (CFO, clock, IQ, LO leakage, SNR) defining centers and spreads. |
+| `data/srrc_ripple_per_config.json` | Common-mode SRRC band ripple (one FIR per config). |
+| `data/bb60_rx_fir_5msps_n10.npy` | Measured BB60C anti-alias response. |
+| `data/repeat_log.json` | August re-capture of the same fleet, used by the cross-session figure. |
+| `data/fitted_blocks_30BF779_89_433.npz` | Extracted per-symbol deviations, real and synthetic, for the fidelity figure (the raw captures it came from are not shipped). |
 
 ## Variation Kinds
 
@@ -95,7 +108,7 @@ The repository includes a trimmed version of `PA_modelling_with_GMP/cel_signal_g
 *   **Licensing Note:** `core/filter_design.py` includes SRRC design code by Matt @ WaveWalkerDSP.com (Copyright 2021) released under the MIT license. This notice must be retained in any redistribution.
 
 **Data Provenance:**
-*   `radio_characterisation.json` contains the measured per-run log for 23 radios × 6 configurations × 100 runs. 
-*   `isi_taps.json` contains the fitted blocks. The generator requires paired ripple curves to run, preventing double-counting of band shapes.
+*   `data/radio_characterisation.json` contains the measured per-run log for 23 radios × 6 configurations × 100 runs. 
+*   `data/isi_taps.json` contains the fitted blocks. The generator requires paired ripple curves to run, preventing double-counting of band shapes.
 
 *Note: Claude (Anthropic) assisted with coding, analysis, and documentation formatting. Measurements, modeling, and validation are original author work.*

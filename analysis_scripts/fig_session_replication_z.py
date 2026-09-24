@@ -155,7 +155,13 @@ for j in range(len(params), NR * NC):
     axes[j // NC, j % NC].axis("off")
 
 # Legend placed in the dedicated bottom row (spanning all columns)
-h = [plt.Line2D([], [], marker="o", ls="", color=CFG_COL[c], label=c, markersize=4.0)
+# THE DIRECTORY NAME IS NOT THE CARRIER. The "2400" configs were recorded
+# at 2450.0 MHz on every session used here -- only four early captures
+# used 2400.0, and those are excluded as bad-carrier sessions. The legend
+# shows the carrier actually used; the config keys are left untouched.
+CFG_LABEL = {c: c.replace("_2400", "_2450") for c in CFG_COL}
+h = [plt.Line2D([], [], marker="o", ls="", color=CFG_COL[c],
+                label=CFG_LABEL[c], markersize=4.0)
      for c in S.CONFIGS]
 
 # Suptitle & Legend
@@ -176,6 +182,7 @@ leg_ax.legend(
     bbox_to_anchor=(0.5, -0.1) # <--- Clears well below the "July (z)" text
 )
 
+(BASE / "figures").mkdir(exist_ok=True)
 out = (BASE / "figures"
        / f"A4s_session_replication_z{'' if _sel == 'all' else '_core'}.png")
 fig.savefig(out, dpi=250, bbox_inches="tight")

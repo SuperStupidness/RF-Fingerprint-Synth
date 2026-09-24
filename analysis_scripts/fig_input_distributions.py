@@ -57,13 +57,27 @@ for _q in ("", "PA_modelling_with_GMP", "analysis_scripts", "analysis_scripts/bo
 import synth_dataset as SD          # noqa: E402
 sys.argv = ["x"] + _argv
 
-log = json.loads((BASE / "radio_characterisation.json").read_text())
+log = json.loads((BASE / "data" / "radio_characterisation.json").read_text())
 pat = re.compile(rf"^TX{RAD}_RXBB60_(\d+)/g{CFG}$")
-rows = [v for v in log.values()
-        if isinstance(v, dict) and pat.match(str(v.get("session", "")))]
-if not rows:
+rows_all = [v for v in log.values()
+            if isinstance(v, dict) and pat.match(str(v.get("session", "")))]
+if not rows_all:
     raise SystemExit(f"no runs for {RAD}/{CFG}")
-sess = pat.match(str(rows[0]["session"])).group(1)
+# ONE SESSION ONLY. A radio can have more than one session in the log (five do),
+# and matching on radio+config alone silently pools them -- mixing capture days,
+# and for the five old-format sessions mixing rows that carry iq_amp_db with
+# rows that do not. Pick one: prefer current-format, then most runs, then the
+# lowest session id so the choice is deterministic.
+_by_sess = {}
+for v in rows_all:
+    _by_sess.setdefault(pat.match(str(v["session"])).group(1), []).append(v)
+sess = max(_by_sess, key=lambda s: (
+    any(x.get("iq_amp_db") is not None for x in _by_sess[s]),
+    len(_by_sess[s]), "0" + s))
+rows = _by_sess[sess]
+if len(_by_sess) > 1:
+    print(f"  {RAD}/{CFG}: {len(_by_sess)} sessions "
+          f"({', '.join(sorted(_by_sess))}) -- using {sess}")
 
 
 def col(k):
@@ -123,13 +137,14 @@ PHI_LAB = "AR(1)  $\\phi$=" + f"{PHI:.2f}"
 # curve that is NOT a generator model: the CFO marginal broadened by that
 # estimator's error, which exists only to explain why the CFO histogram is wide.
 PANELS = [
+    # CENTRE AS THE GENERATOR DOES IT. It centres the reference on the CFO
+    # MEAN and adds the MEDIAN of (clock - CFO); centring on the clock's own
+    # sample mean instead put this curve 0.49 sigma off what is sampled.
     ("Sampling clock mismatch", _clk, "ppm",
-     [("gauss", float(_clk.mean()), REF_SD, AR_COL, "-", PHI_LAB)]),
+     [("gauss", REF_MU + CLK_OFF, REF_SD, AR_COL, "-", PHI_LAB)]),
     ("CFO  = clock mismatch " + f"{-CLK_OFF:+.4f}" + " ppm", _cfo, "ppm",
-     [("gauss", float(_clk.mean()) - CLK_OFF, REF_SD, AR_COL, "-",
-       "derived"),
-      ("gauss", float(_clk.mean()) - CLK_OFF, CFO_TOT, NOISE_COL, "--",
-       "+ est. error")]),
+     [("gauss", REF_MU, REF_SD, AR_COL, "-", "derived"),
+      ("gauss", REF_MU, CFO_TOT, NOISE_COL, "--", "+ est. error")]),
     # WRAP ARTIFACT, not a generator input. radio_characterise stores this as
     # clock_phase_mean_samp and its own comment calls it a wrapping artifact,
     # preferring clock_phase_intercept_samp (the burst-0 phase = cp0, the actual
