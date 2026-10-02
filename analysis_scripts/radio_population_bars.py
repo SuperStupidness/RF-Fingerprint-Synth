@@ -165,8 +165,8 @@ print(f"{len(order)} radios: " + ", ".join(order))
 ALL_ROWS = [("osc_ppm", "osc ppm"), ("clk_mis", "clock mismatch (ppm)"),
             ("clk_ph", "clock phase (samp)"), ("leak", "LO leakage (dBc)"),
             ("rx_dc", "RX DC (frac)"), ("iq_ph", "IQ phase (deg)"),
-            ("iq_amp", "IQ amplitude (dB)"), ("amp_var", "amp variance (%)"),
-            ("ph_var", "phase variance (deg)"), ("snr", "SNR (dB)")]
+            ("iq_amp", "IQ amplitude (dB)"), ("amp_var", "amp spread (%)"),
+            ("ph_var", "phase spread (deg)"), ("snr", "SNR (dB)")]
 # ORDERED to match the cross-day figure's story: the three crystal-derived
 # parameters that survive re-capture, then the partial ones, then those that do
 # not. Ten metrics x two gains is 20 panels of 69 bars; at four pages that is
@@ -179,7 +179,14 @@ ALL_ROWS = [("osc_ppm", "osc ppm"), ("clk_mis", "clock mismatch (ppm)"),
 # clock_phase_intercept_samp (cp0), which only 5 of 23 July radios carry.
 # SNR is present in every row, separates devices 1.7-2.9x, and replicates
 # July->August at rs 0.61-0.93.
-CORE = {"osc_ppm", "clk_mis", "leak", "iq_ph", "iq_amp", "snr"}
+# MEASURED IMPAIRMENTS ADDED (2026-09-28): the constellation spread --
+# amplitude (%) and phase (deg), the rms deviation of each symbol from its
+# cluster centre -- is where the PA, ISI and phase noise show up together, and
+# every radio carries it at every config. The PA-specific fields (AM/AM droop,
+# AM/PM span, SCD compression) are NOT added: only 4-5 of 23 radios have them,
+# because they were added to radio_characterise in mid-August and most
+# sessions have not been reprocessed since.
+CORE = {"osc_ppm", "clk_mis", "leak", "iq_ph", "iq_amp", "amp_var", "ph_var", "snr"}
 _sel = sys.argv[1] if len(sys.argv) > 1 else "core"
 ROWS = ([r for r in ALL_ROWS if r[0] in CORE] if _sel == "core"
         else ALL_ROWS if _sel == "all"
@@ -235,7 +242,7 @@ for gi, g in enumerate(GAINS):
     ax[-1, gi].set_xlabel("Radio Index", fontsize=11)
 
 plt.suptitle(f"Radio population (bars) — {len(order)} radios, faceted by gain "
-             f"(error bars = run-to-run std)", fontsize=14)
+             f"(error bars = run-to-run std; half-IQR for the spread rows)", fontsize=14)
 plt.tight_layout()
 (BASE / "figures").mkdir(exist_ok=True)
 out = BASE / "figures" / (f"A4s_radio_population_bars"
