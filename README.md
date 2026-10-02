@@ -1,5 +1,7 @@
 # Synthetic RF Fingerprint Generator
 
+**Note: Claude (Anthropic) assisted with coding, analysis, and documentation formatting. Measurements, modeling, and validation are original author work.**
+
 Generates synthetic SRRC-QPSK captures in SigMF format based on measured profiles from 23 real USRP B210 transmitters. 
 
 We are trying to find a solution to store the full dataset. For now here are some samples. Sample dataset link: https://drive.google.com/drive/folders/1A3LalT3Ojt_YU07PwynkjhlF8aStcJZV?usp=sharing.
@@ -110,5 +112,3 @@ The repository includes a trimmed version of `PA_modelling_with_GMP/cel_signal_g
 **Data Provenance:**
 *   `data/radio_characterisation.json` contains the measured per-run log for 23 radios × 6 configurations × 100 runs. 
 *   `data/isi_taps.json` contains the fitted blocks. The generator requires paired ripple curves to run, preventing double-counting of band shapes.
-
-*Note: Claude (Anthropic) assisted with coding, analysis, and documentation formatting. Measurements, modeling, and validation are original author work.*
