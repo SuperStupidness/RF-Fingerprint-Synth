@@ -81,6 +81,24 @@ Fitted blocks are held fixed per radio; measured blocks are redrawn each run fro
 
 Each fitted file records the measurements it came from and how. `rx_spur.py` estimates, removes or adds the receiver spur on any capture.
 
+## Results
+
+One radio, 30BF7B6, in all six configurations: a real capture against the generator's default output, demodulated the same way. The real capture has the receiver spur removed, since the generator leaves it out by default.
+
+**Spectrum.** The in-band shape, the noise floor and, at gain 89 (433 and 915 MHz), the PA's spectral regrowth all line up.
+
+<p align="center"><img src="figures/results_30BF7B6_psd.png" width="760" alt="30BF7B6 power spectrum, real against synthetic, six configurations"></p>
+
+**Constellation.** The synthetic clusters reproduce the real shapes, including the elongated gain-89 clusters.
+
+<p align="center"><img src="figures/results_30BF7B6_constellation.png" width="760" alt="30BF7B6 (+,+) constellation cluster, real against synthetic, six configurations"></p>
+
+**Per-symbol deviation.** The tangential and radial spreads are within about 15 % of real in every configuration. The synthetic constellation is slightly tighter in most of them, most at 89 / 433 MHz (2.9° against 3.5° tangential), which is the gain-89 shortfall under Known limitations.
+
+<p align="center"><img src="figures/results_30BF7B6_deviation.png" width="760" alt="30BF7B6 per-symbol tangential deviation, real against synthetic, six configurations"></p>
+
+The figure comes from `analysis_scripts/fig_readme_results.py` in the measurement repository; the real captures are not shipped.
+
 ## Variation kinds
 
 Each parameter in the variation spec has a `kind`:
