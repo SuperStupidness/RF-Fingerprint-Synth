@@ -1,0 +1,30 @@
+{
+ "format_version": 1,
+ "what_it_is": "Per-burst complex gain modulation at gain 89 (433/915 MHz): g_j = 1 + amp * exp(j(2 pi freq_hz j / f_burst + phase)), phase random per run. Transmit-side: unchanged when the level into the BB60 drops ~20 dB (D:/gain_experiment). Fleet-common: same frequency on all 24 radios and both sessions (July/August), size within ~+-10 %. Not a fingerprint.",
+ "measurement": "Per-burst complex gain of each burst against the run's average burst, strongest line in +-20 Hz at the burst rate (766.28 Hz); amp = |complex amplitude| of that line (half the peak-to-peak gain swing). 2 runs x 45 sessions per config.",
+ "frequency_note": "Frequencies are as seen at the burst rate; a true frequency of 766.28*k + f cannot be excluded, but a per-burst gain that large rules out k != 0 averaging within a 1.3 ms burst.",
+ "absent": "89_2400 and every gain-77 config: no consistent line (< 0.8 % peak-to-peak, random frequency).",
+ "configs": {
+  "89_433": {
+   "freq_hz": -2.15,
+   "amp": 0.04957,
+   "n_runs": 90,
+   "amp_p10_p90": [
+    0.04497,
+    0.05376
+   ],
+   "b_amp": 0.0455
+  },
+  "89_915": {
+   "freq_hz": -2.38,
+   "amp": 0.01608,
+   "n_runs": 90,
+   "amp_p10_p90": [
+    0.0143,
+    0.01826
+   ],
+   "b_amp": 0.0195
+  }
+ },
+ "b_amp_note": "b_amp = |complex line amplitude| of the per-burst change of the cubic b (clean-fit model, 30ECB6B, August, 10 runs); locked to the gain line: c_b/c_g = 0.88 (433) / 1.24 (915), phase within ~1 deg across runs."
+}
