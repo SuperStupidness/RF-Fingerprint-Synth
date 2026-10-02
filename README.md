@@ -51,6 +51,14 @@ python synth_dataset.py --radio 30BF7B6 --config 77_433 \
 
 *Note: `--config` uses the format `<gain>_<band MHz>` (e.g., gain 77 or 89, band 433, 915, or 2400).*
 
+Add `--cubic-preamble` to use the previous burst transient in the preamble (extrapolated, see below); it reproduces pre-2026-09-28 datasets together with `--per-burst-pn`.
+
+Add `--per-burst-pn` to use the previous phase-noise model (one independent draw per burst); it reproduces datasets made before 2026-09-27 exactly. The default is one curve per radio, drawn as a single process across the run (see below).
+
+Add `--rx-spur` to include the BB60 receiver's phase spur, which every real capture carries (see below). It is off by default.
+
+Add `--no-pa-clean`, `--no-pa-mod` or `--old-leakage` to restore the PA fit, the gain-89 PA modulation or the TX LO leakage of earlier versions; each reproduces the previous output bit for bit (see [`CHANGELOG.md`](CHANGELOG.md)).
+
 ### Output Layout
 
 ```text
@@ -66,15 +74,26 @@ out/77_433/
 
 ## Signal Chain & Parameters
 
-**Signal flow:** SRRC QPSK burst → phase noise → PA → ISI taps → burst transient → IQ imbalance → TX LO leakage → CFO → RX DC → sampling clock → AWGN → RX anti-alias filter.
+**Signal flow:** SRRC QPSK burst → phase noise → PA → ISI taps → burst transient → IQ imbalance → TX LO leakage → CFO → RX DC → sampling clock → AWGN → [RX spur, opt-in] → RX anti-alias filter.
+
+**Phase noise: one curve per radio and config.** The phase noise is one spectrum from 1.5 Hz to 500 kHz (`data/pn_curves.json`), drawn once per run, so consecutive bursts share the slow LO wander that real captures have (1–8° rms over a run, measured once per burst on the preamble). Each curve is fitted to two real measurements at once: the symbol-by-symbol phase deviation inside the bursts (per radio, 1 kHz up) and the burst-to-burst preamble phase (the same for every radio in a config, 1.5–383 Hz). The fit computes exactly what each measurement would read for a given curve, including the matched filter's smoothing, so no Monte Carlo is involved. The fitted shape falls to about 5 kHz, stays flat from about 6 to 50 kHz and rolls off above, like a PLL loop response. The slow part scales as 20·log10 of the carrier frequency and does not identify the radio; the in-burst level does, where it is resolvable. `--dry-run` prints the curve, `analysis_scripts/fit_pn_curve.py` refits it, and `analysis_scripts/continuous_pn_roundtrip.py` checks generator output against the stored real measurements. `--per-burst-pn` restores the previous model: a straight-line in-burst mask drawn independently for each burst, with no burst-to-burst memory.
+
+**Burst transient in the preamble.** The burst-repetitive phase transient (a bowl over the burst, about 0.8° rms per GHz of carrier) is fitted as a cubic on the data portion only. Applying that cubic over the preamble too extrapolated it: the preamble sat 1.4–1.6× too far from the data in phase, and the burst start 3–4× (12° against 3° real at 89_2400). The preamble part is now a measured profile, one per config (`data/srrc_preamble_transient.json`, from `analysis_scripts/measure_preamble_transient.py`; it barely varies between radios, sd 0.1–0.5°). It is referenced to the data portion exactly as measured and blends into the cubic over the last 100 preamble samples. The data portion is unchanged. `--cubic-preamble` restores the extrapolation.
+
+**Receiver spur (`--rx-spur`, off by default).** Every real capture carries a small phase modulation that repeats every 1168 samples at 5 MS/s (4280.82 Hz), plus its 2nd harmonic: 0.26° peak at 433 MHz, 0.56° at 915, 1.4° at 2400. It comes from the BB60 receiver, not the radios: its phase is fixed to the capture start (identical on captures made days apart), while the transmitted bursts land at random positions; its level changes between capture sessions but does not follow the radio. The generator's fitted parameters were measured on captures with it removed, so by default the output has none. `--rx-spur` adds it back as real captures carry it, with one level and phase per config (`data/rx_spur.json`). `rx_spur.py` has the estimator and the add/remove functions, so you can also measure or remove it on your own captures.
 
 Parameters are sourced from specific files:
 
 | Source File | What It Controls |
 | :--- | :--- |
-| `data/isi_taps.json` | ISI taps, PA cubic, burst transient, phase-noise mask (fitted per radio/config via least squares). |
+| `data/isi_taps.json` | ISI taps, PA cubic, burst transient (fitted per radio/config via least squares), and the straight-line phase-noise mask used only by `--per-burst-pn`. |
 | `data/radio_characterisation.json` | Per-run measurements (CFO, clock, IQ, LO leakage, SNR) defining centers and spreads. |
 | `data/srrc_ripple_per_config.json` | Common-mode SRRC band ripple (one FIR per config). |
+| `data/pn_curves.json` | Phase noise: one curve per radio/config (1.5 Hz–500 kHz), with the real measurements it was fitted to and its fit residuals. |
+| `data/srrc_preamble_transient.json` | Burst-transient phase over the preamble, one measured profile per config. |
+| `data/rx_spur.json` | Receiver phase spur (1168-sample period): level and phase per config, used only with `--rx-spur`. |
+| `data/lo_leakage.json` | TX LO leakage level and the precise carrier offset, per run (re-measured; replaces the log's values). |
+| `data/pa_gain_mod.json` | Gain-89 PA modulation: frequency and size per config, fleet-wide. |
 | `data/bb60_rx_fir_5msps_n10.npy` | Measured BB60C anti-alias response. |
 | `data/repeat_log.json` | August re-capture of the same fleet, used by the cross-session figure. |
 | `data/fitted_blocks_30BF779_89_433.npz` | Extracted per-symbol deviations, real and synthetic, for the fidelity figure (the raw captures it came from are not shipped). |
@@ -90,7 +109,7 @@ Each parameter in the variation spec (`profile.json`) uses a `kind` rule to dete
 | `uniform` | Drawn uniformly (used for phases and sampling-grid offsets). |
 | `gauss` | Gaussian draw at the measured standard deviation (optionally clamped to bounds). |
 | `ar1` | Gaussian draw that wanders across runs (run-to-run memory set by `phi`). |
-| `mixture` | Finite Gaussian mixture (e.g., used for bimodal TX LO leakage). |
+| `mixture` | Finite Gaussian mixture (e.g., TX LO leakage in the gain-89 sessions that show two states). |
 | `scipy` | Any `scipy.stats` distribution by name. |
 
 ## Known Limitations
@@ -99,10 +118,12 @@ These are measured constraints of the current physical model:
 
 *   **Phase-noise level:** Modeled as a fleet mean. Per-radio levels aren't resolvable with the current gate statistic.
 *   **Burst transients:** Held constant per configuration (scaling with carrier frequency) because within-radio scatter exceeds between-radio spread.
-*   **Phase fidelity:** The model captures ~96% of measured amplitude spread but only ~76% of phase spread.
+*   **Constellation spread at gain 89, 433/915 MHz:** Measured with `radio_characterise.py` (with the 2026-09-26 merged phase-noise curve), the phase spread is 0.95–1.00 of real at 77_433, 77_915 and 89_2400 and 0.87–0.92 at 89_915 and 77_2400, but only 0.61 at 89_433. The amplitude spread is 0.91–0.99 of real, except 0.68 at 89_433 and 0.75 at 89_915. The shortfall is not phase noise. At 89_433 the cubic PA gives about 76% of the real AM/PM pattern, and at gain 89 (433/915) real captures carry a noise-like distortion (about −35 dBc, only while transmitting) that the generator does not model. That distortion is likely a receiver-overload effect of the capture setup.
 *   **ISI lattice:** Uses three fixed taps, resulting in slightly sharper amplitude states than real, smoother hardware.
-*   **LO-leakage bimodality:** The two lobes are empirically fitted; the physical mechanism is unresolved and per-run draws are treated independently.
+*   **LO-leakage states at gain 89:** Some gain-89 sessions show two leakage levels 10–17 dB apart, which runs switch between at random. They are fitted as a mixture; the mechanism is unresolved. (The apparent bimodality at 915 and 2400 MHz in earlier versions was a measurement error, see [`CHANGELOG.md`](CHANGELOG.md), 2026-10-01.)
 *   **Clock phase mean:** The `clock_phase_mean_samp` in the log is a wrapping artifact, not a true radio property.
+*   **Phase noise above ~200 kHz:** At 2400 MHz and on some 89_433 radios the in-burst phase noise falls below the thermal noise above about 105–250 kHz, so there the curve is set only by the total in-burst variance and a no-rise constraint.
+*   **Wideband tangential noise on a few profiles:** 30BF7C1/89_433 carries a tangential excess that stays flat to 300 kHz, about 10 dB above its fleet peers. It is not LO phase noise (likely the gain-89 distortion above), and one curve cannot reproduce it: its in-burst phase-noise rms comes out 0.82× real. 30ECB71/89_915 is similar but milder (0.90×).
 
 ## Bundled Library & Provenance
 
@@ -111,4 +132,9 @@ The repository includes a trimmed version of `PA_modelling_with_GMP/cel_signal_g
 
 **Data Provenance:**
 *   `data/radio_characterisation.json` contains the measured per-run log for 23 radios × 6 configurations × 100 runs. 
-*   `data/isi_taps.json` contains the fitted blocks. The generator requires paired ripple curves to run, preventing double-counting of band shapes.
+*   `data/isi_taps.json` contains the fitted blocks. The generator requires paired ripple curves to run, preventing double-counting of band shapes. Its phase-noise fields are fitted on captures with the receiver spur removed (see [`CHANGELOG.md`](CHANGELOG.md)).
+*   `data/pn_curves.json` and `data/rx_spur.json` record the real measurements they were fitted to, and how.
+
+## Update Log
+
+See [`CHANGELOG.md`](CHANGELOG.md). Each entry states whether the default output changed, and which flag restores the previous behaviour.

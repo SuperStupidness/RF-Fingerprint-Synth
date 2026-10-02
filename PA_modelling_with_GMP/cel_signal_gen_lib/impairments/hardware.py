@@ -391,28 +391,53 @@ def _decimation_taps(fs, bandwidth, stop_db, transition_frac):
     return firwin(numtaps, fcut / (fs / 2.0), window=('kaiser', beta))
 
 
-def add_decimation_filter(signal, fs, bandwidth, stop_db=100.0, transition_frac=0.12):
-    """Model an SDR decimation / anti-alias brick-wall (e.g. the Signal Hound
-    BB60 IQ filter).
+def add_decimation_filter(signal, fs, bandwidth=None, stop_db=100.0,
+                          transition_frac=0.12, fir=None):
+    """Model an SDR decimation / anti-alias filter (e.g. the Signal Hound BB60
+    IQ filter).
 
-    Flat passband to +/- bandwidth/2, sharp transition, deep stopband —
-    reproduces the "flat noise floor then cliff" the BB60 imprints when
-    decimating to the target IQ rate (the BB60 auto bandwidth is 0.75 x the
-    decimated rate). Without this, a synthetic capture has no band edge and a
-    raw-IQ classifier trivially separates it from real BB60 captures.
+    TWO MODES:
+    - fir=None: a designed linear-phase Kaiser FIR, flat to +/- bandwidth/2
+      with a sharp transition and stop_db of stopband.
+    - fir=<array>: apply a MEASURED receive response (odd-length, linear-phase
+      FIR taps, unit DC gain). This is what our pipelines use, because no
+      designed family matches the real BB60: its edge falls ~37 dB in 500 kHz
+      onto a FLAT shelf, where a Kaiser keeps decaying (8.6 dB rms misfit) and
+      an equiripple misses the edge. Measured files (601 taps each):
+        github_generator/data/bb60_rx_fir_5msps_n10.npy        (SRRC, 5 MS/s)
+        analysis_scripts/bb60_rx_response_40msps_27mhz.npy     (wifi, 40 MS/s)
+      bandwidth / stop_db / transition_frac are ignored when fir is given.
 
-    Linear-phase Kaiser FIR; group delay compensated so len(out) == len(in).
+    MEASURED BB60 GEOMETRY (correcting the earlier note here, which said the
+    auto bandwidth is 0.75 x the decimated rate): passband edge 0.675 x fs,
+    full stopband by ~0.75 x fs/2 + transition, stopband ~75.7 dB, flat. If
+    you use the Kaiser mode for a BB60, bandwidth = 0.675 * fs and a stop_db
+    near 76 are the measured values, but the shape still differs (see above).
+
+    Group delay compensated, so len(out) == len(in) (the same alignment as
+    scipy's oaconvolve mode='same' for an odd-length filter).
 
     Parameters
     ----------
     signal : np.ndarray      complex baseband sampled at fs
     fs : float               sample rate (Hz)
     bandwidth : float        flat IQ bandwidth (Hz); passband edge = bandwidth/2
-    stop_db : float          stopband attenuation (dB)
+                             (Kaiser mode only)
+    stop_db : float          stopband attenuation (dB) (Kaiser mode only)
     transition_frac : float  transition width as a fraction of the passband edge
+                             (Kaiser mode only)
+    fir : array_like         measured FIR taps (odd length); overrides the design
     """
     from scipy.signal import oaconvolve
-    taps = _decimation_taps(fs, bandwidth, stop_db, transition_frac)
+    if fir is not None:
+        taps = np.asarray(fir, dtype=float)
+        if taps.size % 2 == 0:
+            raise ValueError('fir must have an odd number of taps (linear phase, '
+                             'integer group delay)')
+    else:
+        if bandwidth is None:
+            raise ValueError('bandwidth is required unless a measured fir is given')
+        taps = _decimation_taps(fs, bandwidth, stop_db, transition_frac)
     gd = (len(taps) - 1) // 2
     return oaconvolve(signal, taps)[gd:gd + len(signal)].astype(signal.dtype)
 
@@ -534,12 +559,46 @@ def add_carrier_frequency_drift(signal, cfo=0.0, max_drift=0.001,
     return signal * np.exp(1j * phase)
 
 
+def _sinc_interp(x, t, ntap=33, beta=8.0, edge='zero'):
+    """Band-limited interpolation of x at (fractional) sample times t, with a
+    Kaiser-windowed sinc of ntap taps. edge='zero' treats samples outside the
+    array as 0 (as np.interp with left=right=0 did); edge='clamp' repeats the
+    end samples."""
+    from scipy.special import i0
+    x = np.asarray(x, dtype=np.complex128)
+    n0 = np.floor(t).astype(np.int64)
+    mu = t - n0
+    M = ntap // 2
+    out = np.zeros(t.size, dtype=np.complex128)
+    for k in range(-M, M + 1):
+        d = mu - k                       # distance from tap k to the sample
+        w = i0(beta * np.sqrt(np.maximum(0.0, 1.0 - (d / (M + 1)) ** 2))) / i0(beta)
+        idx = n0 + k
+        if edge == 'clamp':
+            v = x[np.clip(idx, 0, x.size - 1)]
+        else:
+            ok = (idx >= 0) & (idx < x.size)
+            v = np.where(ok, x[np.clip(idx, 0, x.size - 1)], 0.0)
+        out += v * np.sinc(d) * w
+    return out
+
+
 def add_sampling_clock_drift(signal, drift_ppm=0.0, max_drift_ppm=0.0,
                               mean_reversion=0.001, drift_type='constant',
-                              rng=np.random.default_rng()):
+                              rng=np.random.default_rng(), method='sinc',
+                              ntap=33, beta=8.0, edge='zero'):
     """
     Applies sampling clock drift to simulate an ADC clock rate offset,
     optionally with a wandering clock rate.
+
+    INTERPOLATION (changed 2026-09-28): method='sinc' (default) resamples
+    with a 33-tap Kaiser-windowed sinc. The previous np.interp is LINEAR
+    interpolation, a 2-tap kernel whose response is sinc^2: on a band-limited
+    signal it splatters broadband energy, measured +18.7 dB above the real
+    noise floor in the idle gaps of the wifi captures (~24 dB onto whichever
+    side was resampled), and it faked a 'thermal amplitude transient' before it
+    was caught. The windowed sinc is the kernel wifi_reconstruct.py and
+    sync_toolkit validated. method='linear' reproduces the old output exactly.
 
     Parameters
     ----------
@@ -560,6 +619,14 @@ def add_sampling_clock_drift(signal, drift_ppm=0.0, max_drift_ppm=0.0,
         'random_walk': OU wandering rate bounded by max_drift_ppm.
     rng : numpy.random.Generator, optional
         Random number generator (only used for 'random_walk').
+    method : str, optional
+        'sinc' (default): Kaiser-windowed sinc interpolation.
+        'linear': the old np.interp (reproduces earlier outputs).
+    ntap, beta : int, float, optional
+        Sinc length (odd) and Kaiser beta, only for method='sinc'.
+    edge : str, optional
+        'zero' (default): outside the input counts as 0, as before.
+        'clamp': repeat the end samples. Only for method='sinc'.
 
     Returns
     -------
@@ -592,7 +659,11 @@ def add_sampling_clock_drift(signal, drift_ppm=0.0, max_drift_ppm=0.0,
             f"Unknown drift_type '{drift_type}'. Must be 'constant' or 'random_walk'."
         )
 
-    # Linear interpolation — fast and vectorized
+    if method == 'sinc':
+        return _sinc_interp(signal, t_drift, ntap=ntap, beta=beta, edge=edge)
+    if method != 'linear':
+        raise ValueError(f"Unknown method '{method}'. Must be 'sinc' or 'linear'.")
+    # the old linear interpolation, kept to reproduce earlier outputs
     result_I = np.interp(t_drift, n, np.real(signal), left=0.0, right=0.0)
     result_Q = np.interp(t_drift, n, np.imag(signal), left=0.0, right=0.0)
 
@@ -632,12 +703,28 @@ def add_sampling_clock_jitter(signal, jitter_std, rng=np.random.default_rng()):
 def add_pa_nonlinearity(signal, model='saleh',
                         alpha_a=2.1587, beta_a=1.1517,
                         alpha_p=4.0033, beta_p=9.1040,
-                        coeffs=None, input_backoff_db=0.0):
+                        coeffs=None, input_backoff_db=0.0,
+                        b=0j, A=1e6, p=3.0, norm_slice=None):
     """
     Applies memoryless power amplifier nonlinearity to a complex
     baseband signal.
 
-    Supports two models:
+    FITTED MODELS ('cubic', 'rapp') -- the ones our measurements support:
+    - 'cubic': y = u + b*u*|u|^2 with b COMPLEX, so compression (Re b < 0)
+               and AM/PM (Im b) are free to differ. This is the model fitted
+               per radio/config (github_generator/data/isi_taps.json,
+               pa_b_re / pa_b_im); a quintic added nothing (4.35 -> 4.31x the
+               noise floor) and GMP cross-terms cost 21 parameters for 1.5x.
+    - 'rapp':  amplitude-only soft limiter u / (1 + (|u|/A)^(2p))^(1/(2p)); it
+               cannot produce AM/PM at all. A >= 100 is treated as linear.
+    Both are fitted in NORMALISED units: u = x / rms(x[norm_slice]), and the
+    output is rescaled so rms(y[norm_slice]) equals the input's -- i.e. b and
+    A are relative to the drive level, and the PA changes the shape, not the
+    power. norm_slice should be the portion the fit used (the DATA portion of
+    a burst: a whole-burst rms pulls in the idle tail and over-drives it).
+    None means the whole signal. input_backoff_db is not used by these models.
+
+    Also supports two generic models:
     - Saleh: Empirical AM/AM and AM/PM model, commonly used for
              traveling wave tube amplifiers (TWTA). Exhibits soft
              saturation.
@@ -650,7 +737,7 @@ def add_pa_nonlinearity(signal, model='saleh',
     signal : numpy.ndarray
         The input complex baseband signal.
     model : str, optional
-        'saleh' (default) or 'taylor'.
+        'saleh' (default), 'taylor', 'cubic' or 'rapp'.
     alpha_a : float, optional
         Saleh AM/AM numerator. Default 2.1587 (Saleh 1981).
     beta_a : float, optional
@@ -668,13 +755,31 @@ def add_pa_nonlinearity(signal, model='saleh',
     input_backoff_db : float, optional
         Input back-off in dB. Positive values reduce the input
         amplitude, pushing the PA toward its linear region.
-        Default is 0.0.
+        Default is 0.0. Saleh and Taylor only.
+    b : complex, optional
+        'cubic' coefficient (normalised units). Default 0 (linear).
+    A, p : float, optional
+        'rapp' saturation level (normalised units) and smoothness.
+    norm_slice : slice, optional
+        Portion used for the drive/output normalisation of 'cubic' and 'rapp'.
 
     Returns
     -------
     numpy.ndarray
         The signal after PA nonlinearity.
     """
+    if model in ('cubic', 'rapp'):
+        sl = slice(None) if norm_slice is None else norm_slice
+        if model == 'rapp' and A >= 100:
+            return signal
+        s0 = np.sqrt(np.mean(np.abs(signal[sl]) ** 2))
+        u = signal / s0
+        if model == 'cubic':
+            u = u + complex(b) * u * np.abs(u) ** 2
+        else:
+            u = u / np.power(1 + np.power(np.abs(u) / A, 2 * p), 1 / (2 * p))
+        return u * (s0 / np.sqrt(np.mean(np.abs(u[sl]) ** 2)))
+
     # Apply input back-off
     backoff_linear = 10.0 ** (-input_backoff_db / 20.0)
     x = signal * backoff_linear
@@ -705,7 +810,7 @@ def add_pa_nonlinearity(signal, model='saleh',
 
     else:
         raise ValueError(
-            f"Unknown model '{model}'. Must be 'saleh' or 'taylor'."
+            f"Unknown model '{model}'. Must be 'saleh', 'taylor', 'cubic' or 'rapp'."
         )
 
 def fit_pa_saleh(input_amplitude, output_amplitude, output_phase_shift):

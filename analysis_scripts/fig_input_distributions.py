@@ -15,20 +15,21 @@ the CFO mean, then adds clock_offset_ppm to get the clock. That is the same
 model up to a constant -- the presentation here just puts the precise estimator
 first, which is what the numbers support.)
 
-WHY THE CFO PANEL'S NARROW CURVE DOES NOT MATCH ITS HISTOGRAM. Three estimators
-of that one oscillator differ enormously in precision -- clock mismatch 0.403 Hz,
-LO leakage tone 0.895 Hz, CFO 2.326 Hz -- so ~97% of the CFO histogram's variance
-is ESTIMATOR ERROR rather than oscillator wander. It is NOT thermal noise: the
-CRLB over the 1 ms data segment at 49 dB SNR is 0.027 Hz per burst, so the excess
-runs 84x that (729x if CFO averages 76 bursts). The leakage tone is the check
-that settles it -- the same LO seen a second way moves only 0.895 Hz, so at most
-that is real wander and the remaining 2.15 Hz is error in the CFO estimator,
-whatever its mechanism (modulation-dependent bias, residual timing, ISI). The
-generator therefore takes ref_ppm's spread from the clock estimator. Plotting
-that injected marginal straight onto the CFO histogram compares an injected
-truth against a noisy measurement, which is why the CFO panel shows BOTH the
-injected marginal and that marginal broadened by the CFO estimator noise -- the
-latter is what a CFO measurement of synthetic data would actually look like.
+THE CFO PANEL USES THE PRECISE CFO (2026-10-02). The characterisation log's CFO
+is an x^4 estimate on the data portion. It sits about 7 ppb below the true
+offset and is noisy -- 5.8x the clock's spread on 30BF779/89_433 -- and the
+"fixed clock-CFO offset" (+0.0057 ppm, always positive) was that bias. The
+generator now uses the per-run CFO refined by the preamble phase slope
+(data/lo_leakage.json, analysis_scripts/remeasure_lo_leakage.py). With it the
+clock-CFO offset is +0.0001 ppm, the CFO is no noisier than the clock, and the
+injected marginal sits on the histogram. The dashed "+ est. error" curve is
+drawn only where the plotted CFO is still the x^4 one (a session with no
+re-measurement).
+
+EVERY CURVE IS THE GENERATOR'S OWN. The profile and variation spec come from
+synth_dataset.profile_from_log for this exact session, and the leakage panel
+shows the re-measured levels the generator fits, so no panel can disagree with
+what synth_dataset samples.
 
 For the Gaussian parameters the generator uses the measured sd directly, so on
 those panels the estimator noise is already inside the model and the curve sits
@@ -86,15 +87,24 @@ def col(k):
 
 fc = col("fc_hz").mean()
 
-# MODEL PARAMETERS ARE TAKEN THE WAY synth_dataset DERIVES THEM, not refitted
-# here, so each overlay is the distribution the generator actually samples.
-_cfo = col("cfo_hz") / (fc * 1e-6)
+# THE GENERATOR'S OWN PROFILE AND SPEC for this session, so each overlay is the
+# distribution synth_dataset actually samples.
+import os as _os                    # noqa: E402
+_os.environ["SG_SESSION"] = sess
+_PROF, _VAR = SD.profile_from_log(RAD, CFG)
+_LEAK = SD._leak_table(RAD, sess, CFG)
+if _LEAK is not None:               # the precise per-run CFO the generator uses
+    _by_run = {r: x["cfo_hz"] for r, x in _LEAK["runs"].items()}
+    _cfo = np.array([_by_run[r["run"]] for r in rows
+                     if r.get("cfo_hz") is not None and r.get("run") in _by_run]) / (fc * 1e-6)
+    CFO_NAME = "CFO (preamble-refined)"
+else:
+    _cfo = col("cfo_hz") / (fc * 1e-6)
+    CFO_NAME = "CFO (x$^4$)"
 _clk = col("clock_mismatch_ppm")
-_x = _cfo - _cfo.mean()
-PHI = (float(np.clip(np.corrcoef(_x[:-1], _x[1:])[0, 1], 0.0, 0.98))
-       if _x.size > 2 and _x.std() > 0 else 0.0)
-REF_MU, REF_SD = float(_cfo.mean()), float(_clk.std())
-CLK_OFF = float(np.median(_clk - _cfo))
+PHI = float(_VAR["ref_ppm"].get("phi", 0.0))
+REF_MU, REF_SD = float(_PROF["ref_ppm"]), float(_VAR["ref_ppm"]["sd"])
+CLK_OFF = float(_PROF["clock_offset_ppm"])
 # The clock estimator viewed as a direct reading of ref_ppm: same quantity,
 # offset removed. This is the panel that shows what "ref osc" actually is.
 _ref = _clk - CLK_OFF
@@ -103,24 +113,18 @@ _ref = _clk - CLK_OFF
 # answer rather than a nan.
 CFO_NOISE = float(np.sqrt(max(_cfo.var(ddof=1) - _clk.var(ddof=1), 0.0)))
 CFO_TOT = float(np.hypot(REF_SD, CFO_NOISE))
-# LO leakage: the generator uses the MEDIAN and a ROBUST (IQR/1.349) sd after
-# trimming, not the sample mean and sd -- the distribution is bimodal, so a
-# plain Gaussian fit would misstate the model.
-_lk_all = col("lo_leakage_dbc")
-_q1, _q3 = np.percentile(_lk_all, [25, 75])
-_lk = _lk_all[_lk_all > _q1 - 3.0 * max(_q3 - _q1, 0.5)]
-LEAK_MU = float(np.median(_lk))
-LEAK_SD = float((np.percentile(_lk, 75) - np.percentile(_lk, 25)) / 1.349)
+# LO leakage: the re-measured levels where the session has them (the log's
+# reading missed the tone at 915 and 2400), and the generator's fitted model.
+_lk_all = (np.array([x["leak_dbc"] for x in _LEAK["runs"].values() if x["leak_dbc"] is not None], float)
+           if _LEAK is not None else col("lo_leakage_dbc"))
+LEAK_SPEC = _VAR["lo_leak_dbc"]
 
 GAUSS_COL, AR_COL, UNI_COL, NOISE_COL = "#C1504D", "#7B5EA7", "#3F8F5B", "#B07AA1"
 MIX_COL = "#E8A33D"
 
 
-# TX LO leakage is bimodal on most radio/configs (95 of 138 in the 100-run log).
-# synth_dataset.fit_mixture_bic decides -- BIC margin -10 plus a degeneracy
-# guard -- and returns None where a single Gaussian is the better model, so this
-# panel shows a mixture exactly when the generator will draw one.
-MIX = SD.fit_mixture_bic(_lk)
+# A mixture exactly when the generator draws one (synth_dataset.fit_mixture_bic:
+# BIC margin -10 plus a degeneracy guard); otherwise its robust Gaussian.
 PHI_LAB = "AR(1)  $\\phi$=" + f"{PHI:.2f}"
 
 # (name, samples, unit, [curves]). Each curve is
@@ -142,9 +146,10 @@ PANELS = [
     # sample mean instead put this curve 0.49 sigma off what is sampled.
     ("Sampling clock mismatch", _clk, "ppm",
      [("gauss", REF_MU + CLK_OFF, REF_SD, AR_COL, "-", PHI_LAB)]),
-    ("CFO  = clock mismatch " + f"{-CLK_OFF:+.4f}" + " ppm", _cfo, "ppm",
-     [("gauss", REF_MU, REF_SD, AR_COL, "-", "derived"),
-      ("gauss", REF_MU, CFO_TOT, NOISE_COL, "--", "+ est. error")]),
+    (CFO_NAME + "  = clock " + f"{-CLK_OFF:+.4f}" + " ppm", _cfo, "ppm",
+     [("gauss", REF_MU, REF_SD, AR_COL, "-", "derived")]
+     + ([("gauss", REF_MU, CFO_TOT, NOISE_COL, "--", "+ est. error")]
+        if _LEAK is None else [])),
     # WRAP ARTIFACT, not a generator input. radio_characterise stores this as
     # clock_phase_mean_samp and its own comment calls it a wrapping artifact,
     # preferring clock_phase_intercept_samp (the burst-0 phase = cp0, the actual
@@ -165,14 +170,12 @@ PANELS = [
     ("AWGN (SNR)", col("snr_mean_db"), "dB", None),
     ("IQ amplitude imbalance", col("iq_amp_db"), "dB", None),
     ("IQ phase imbalance", col("iq_phase_deg"), "deg", None),
-    # Only the model the generator actually draws is shown. The superseded
-    # single Gaussian is still computed above because it remains the model
-    # wherever fit_mixture_bic declines the mixture (43 of 138 radio/configs).
+    # Only the model the generator actually draws is shown.
     ("TX LO leakage", _lk_all, "dBc",
-     ([("mix", (MIX["w"], MIX["mu"], MIX["sd"]), None, MIX_COL, "-",
+     ([("mix", (LEAK_SPEC["w"], LEAK_SPEC["mu"], LEAK_SPEC["sd"]), None, MIX_COL, "-",
         "mixture")]
-      if MIX is not None else
-      [("gauss", LEAK_MU, LEAK_SD, GAUSS_COL, "-", "Gaussian")])),
+      if LEAK_SPEC["kind"] == "mixture" else
+      [("gauss", float(_PROF["lo_leak_dbc"]), float(LEAK_SPEC["sd"]), GAUSS_COL, "-", "Gaussian")])),
 ]
 
 # SIZED FOR PRINT, NOT FOR SCREEN. IEEE two-column full width is 7.16 in;
@@ -226,6 +229,7 @@ for ax, (name, v, unit, curves) in zip(axes.ravel(), PANELS):
               handlelength=1.4, handletextpad=0.5, borderpad=0.3,
               labelspacing=0.3)
     ax.tick_params(labelsize=10.0)
+    ax.xaxis.set_major_locator(plt.MaxNLocator(3))   # ppm ticks otherwise collide
     ax.grid(True, alpha=0.25)
 for k in range(len(PANELS), axes.size):
     axes.ravel()[k].axis("off")

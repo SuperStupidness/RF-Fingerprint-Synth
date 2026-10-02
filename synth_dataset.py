@@ -54,14 +54,18 @@ import scipy.signal
 BASE = Path(__file__).resolve().parent
 # Packaged measurement and fit inputs. Kept in one folder so the
 # repository root shows the notebooks rather than a wall of data files.
-DATA = BASE / "data"
+# SG_DATA_DIR (opt-in) swaps the whole folder, e.g. one refitted on a subset
+# of capture sessions so that another can serve as a held-out test set. Each
+# file keeps its own SG_*_FILE override on top of this.
+import os
+DATA = Path(os.environ.get("SG_DATA_DIR", str(BASE / "data")))
 import sys
 sys.path.insert(0, str(BASE))
 sys.path.insert(0, str(BASE / "PA_modelling_with_GMP"))
 from cel_signal_gen_lib.core.filter_design import srrc_design
 from cel_signal_gen_lib.impairments.hardware import (
     add_cfo, add_iq_imbalance, add_symbol_clock_phase, add_phase_noise,
-    add_decimation_filter, _decimation_taps)
+    add_decimation_filter, _decimation_taps, add_pa_nonlinearity)
 from cel_signal_gen_lib.impairments.channel import add_awgn_snr
 
 # ── waveform geometry (matches the capture campaign) ────────────────────────
@@ -223,7 +227,6 @@ SRRC = srrc_design(SPS, SPAN, BETA)
 MF_DELAY = len(SRRC) // 2
 
 LOG = DATA / "radio_characterisation.json"
-TAPS = None      # set below from SG_TAPS_FILE
 
 # ── optional RUN SUBSET / alternate taps file ────────────────────────────────
 # Set by env var so all three scripts (fit_isi_taps, fit_joint, synth_dataset)
@@ -240,11 +243,7 @@ def _sg_subset():
     return {f"run_{int(n):03d}" for n in _j.loads(Path(p).read_text())}
 
 
-def _sg_taps_path(base):
-    import os
-    return Path(os.environ.get("SG_TAPS_FILE", str(base / "data" / "isi_taps.json")))
-
-TAPS = _sg_taps_path(BASE)
+TAPS = Path(os.environ.get("SG_TAPS_FILE", str(DATA / "isi_taps.json")))
 
 # MEASURED SETTLING SHAPE. Sampled profile from the bottom-up direct estimator
 # (tap-referenced, whole-span aligned, validated against injected ground truth
@@ -274,6 +273,25 @@ TAPS = _sg_taps_path(BASE)
 # the fitted-cubic route -- needed when generating from a DIFFERENT capture
 # session than the shape was measured on, where using it would mix sessions).
 import os as _os_sh
+import functools as _ft
+
+
+@_ft.lru_cache(maxsize=None)
+def _load_versioned(path, fmt, key="format_version", why=""):
+    """A versioned JSON data file, parsed once per process: the document, or
+    None if the file does not exist. A different format version RAISES -- a
+    well-formed file in a changed format is the silent failure these checks
+    exist for. `why` is appended to the message."""
+    path = Path(path)
+    if not path.exists():
+        return None
+    d = json.loads(path.read_text())
+    if d.get(key) != fmt:
+        raise SystemExit(f"{path.name}: format_version is {d.get(key)!r}, this generator "
+                         f"expects {fmt}.{(' ' + why) if why else ''}")
+    return d
+
+
 SHAPE_FILE = Path(_os_sh.environ.get("SG_SHAPE_FILE",
                   str(DATA / "srrc_settling_shape_for_generator.json")))
 # The format this loader was written against. Bump ONLY after re-reading the
@@ -301,21 +319,197 @@ RIPPLE_FILE = Path(_os_sh.environ.get(
 RIPPLE_FORMAT = 1
 
 
+# ── PREAMBLE PART OF THE BURST TRANSIENT, per config (default) ───────────────
+# The settling cubic is FITTED on the data portion (t >= 0.077) and was applied
+# over the whole burst, so the preamble was extrapolation: 1.4-1.6x the real
+# preamble offset relative to the data, and 3-4x at the burst start (12 deg vs
+# 3 at 89_2400). Measured directly instead (analysis_scripts/
+# measure_preamble_transient.py; fleet-common, radio sd 0.1-0.5 deg) and
+# spliced in by _splice_preamble. The data portion keeps the fitted cubic its
+# taps were estimated with. --cubic-preamble restores the extrapolation.
+PREAMBLE_FILE = Path(_os_sh.environ.get(
+    "SG_PREAMBLE_FILE", str(DATA / "srrc_preamble_transient.json")))
+PREAMBLE_FORMAT = 1
+
+
+def _preamble_transient(cfg_dir):
+    """{"t", "phi_deg"} for this config, or None."""
+    d = _load_versioned(PREAMBLE_FILE, PREAMBLE_FORMAT)
+    if d is None:
+        return None
+    c = d["configs"].get(cfg_dir)
+    return None if c is None else {"t": d["t"], "phi_deg": c["phi_deg"]}
+
+
+def _splice_preamble(g, t, pt, blend=100):
+    """Replace the cubic's extrapolated preamble by the measured profile.
+
+    Phase: the measured fleet profile, referenced to the DATA-portion mean of
+    this burst's cubic -- exactly how it was measured, so the preamble offset
+    relative to the data is the real one. Not rescaled per radio: the offset
+    varies by only 0.1-0.5 deg between radios, and scaling it by the cubic's
+    data-portion size carried the cubic's own error into the preamble (-34% at
+    89_433, where the cubic is 20% undersized). The last `blend` preamble
+    samples ramp linearly onto the cubic, so the two meet without a step.
+    Magnitude: held at its value at the first data sample (the cubic's
+    magnitude extrapolation is no better founded; the measured radial part is
+    0.1-0.3%)."""
+    i0 = DATA_START
+    phi = np.unwrap(np.angle(g))
+    P = np.deg2rad(np.interp(t, np.asarray(pt["t"]), np.asarray(pt["phi_deg"])))
+    new = np.mean(phi[DATA_START:DATA_END]) + P[:i0]
+    w = np.clip((np.arange(i0) - (i0 - blend)) / blend, 0.0, 1.0)
+    new = new + w * (phi[i0] - new[-1])
+    out = g.copy()
+    out[:i0] = np.abs(g[i0]) * np.exp(1j * new)
+    return out
+
+
 def _ripple_fir(cfg_dir):
     """Complex FIR for this config's ripple, or None if none is in scope."""
-    if not RIPPLE_FILE.exists():
+    d = _load_versioned(RIPPLE_FILE, RIPPLE_FORMAT, key="_format_version",
+                        why="The FIR convention or band may have changed; refusing to "
+                            "inject a curve written for a different contract.")
+    if d is None:
         return None
-    d = json.loads(RIPPLE_FILE.read_text())
-    _v = int(d.get("_format_version", -1))
-    if _v != RIPPLE_FORMAT:
-        raise SystemExit(
-            f"{RIPPLE_FILE.name}: format_version {_v}, this generator expects "
-            f"{RIPPLE_FORMAT}. The FIR convention or band may have changed; "
-            "refusing to inject a curve written for a different contract.")
     c = d["configs"].get(cfg_dir)
     if c is None:
         return None
     return np.array([complex(a, b) for a, b in c["fir"]], dtype=np.complex128)
+
+# ── PHASE NOISE: ONE CURVE PER RADIO/CONFIG (default) ──────────────────────
+# S_phi(f) from 1.5 Hz to 500 kHz, drawn as ONE continuous process per run at
+# symbol rate, so consecutive bursts share the slow LO wander as they do on the
+# real oscillator. Fitted by analysis_scripts/fit_pn_curve.py to TWO real
+# measurements at once, each through its exact expected value:
+#   in-burst   the tangential symbol deviation fit_isi_taps.py builds (per
+#              radio, de-spurred captures), 1-500 kHz
+#   path       the per-burst preamble phase after one constant CFO (fleet-common
+#              per config), 1.5-383 Hz plus the wander variance
+# Fitting them together fixes the region neither sees alone (0.2-3 kHz). The
+# fitted shape falls to ~5 kHz, is FLAT from ~6 to ~50 kHz and rolls off above
+# -- a PLL-like knee the old straight-line mask (+ separately joined close-in
+# points) missed by 2-5 dB at 2-10 kHz.
+#
+# The slow part (below ~200 Hz) is FLEET-COMMON, NOT A FINGERPRINT: six radios
+# agree within ~+-1 dB per config, gain makes no difference, level scales as
+# 20log10(fc). The in-burst level is the per-radio part.
+#
+# --per-burst-pn restores the previous model exactly (pn_mask from
+# isi_taps.json, one independent draw per burst) so older datasets can be
+# regenerated bit for bit.
+PN_CURVES_FILE = Path(_os_sh.environ.get(
+    "SG_PN_CURVES_FILE", str(DATA / "pn_curves.json")))
+PN_CURVES_FORMAT = 1
+
+
+def _pn_curve(radio, cfg_dir):
+    """[(f_hz, S_phi dB)] for this radio/config, or None. radio=None returns
+    every curve of the config, as a list."""
+    d = _load_versioned(PN_CURVES_FILE, PN_CURVES_FORMAT,
+                        why="Units or interpolation may have changed; refusing to inject "
+                            "a curve written for a different contract.")
+    if d is None:
+        return None
+    if radio is None:
+        return [[list(map(float, p)) for p in c["curve"]]
+                for k, c in d.get("curves", {}).items() if k.endswith(f"/{cfg_dir}")]
+    c = d.get("curves", {}).get(f"{radio}/{cfg_dir}")
+    if c is None:
+        return None
+    return [list(map(float, p)) for p in c["curve"]]
+
+
+def _curve_at(curve, f):
+    m = sorted(curve)
+    return float(np.interp(np.log10(f), np.log10([p[0] for p in m]), [p[1] for p in m]))
+
+
+def shift_pn_curve(curve, db, lo=200.0, hi=3200.0):
+    """Shift the PER-RADIO (in-burst) part of a curve by db: fully at and
+    above hi, not at all at or below lo (the fleet-common slow part), linear in
+    log f between. Used where a per-radio level is replaced by the fleet's."""
+    w = np.clip(np.log10(np.array([p[0] for p in curve]) / lo)
+                / np.log10(hi / lo), 0.0, 1.0)
+    return [[p[0], p[1] + db * wi] for p, wi in zip(curve, w)]
+
+# ── RECEIVER PHASE SPUR (OPT-IN, --rx-spur) ─────────────────────────────────
+# Every real capture carries a phase modulation that repeats every 1168 samples
+# (4280.82 Hz) plus its 2nd harmonic, with its phase FIXED to the capture start:
+# the BB60 receiver's, not the radios' (see rx_spur.py). The fitted parameters
+# in this generator come from captures with it REMOVED, so by default the
+# output has none. --rx-spur adds it back exactly as the real captures carry
+# it: deterministic, in the capture's sample frame, before the anti-alias
+# filter, with one fleet level and phase per config. It uses no random numbers.
+from rx_spur import add_rx_spur                                    # noqa: E402
+RX_SPUR_FILE = Path(_os_sh.environ.get(
+    "SG_RX_SPUR_FILE", str(DATA / "rx_spur.json")))
+RX_SPUR_FORMAT = 1
+
+
+# ── PA GAIN MODULATION at gain 89 (OPT-IN, --pa-mod) ─────────────────────────
+# Every real capture at 89_433 / 89_915 carries a per-burst complex gain that
+# rotates at a FIXED rate as seen at the burst rate (-2.15 / -2.38 Hz), about
+# +-5 % / +-1.6 %: g_j = 1 + amp exp(j(2 pi f j / f_burst + phase)). It is
+# transmit-side (unchanged when ~20 dB less reaches the BB60) and fleet-common
+# (all 24 radios, both sessions, size within ~10 %), so one entry per config,
+# random phase per run. It is what the per-burst "random TX term" at gain 89
+# mostly was. data/pa_gain_mod.json; analysis in FINDINGS.md.
+PA_MOD_FILE = Path(_os_sh.environ.get(
+    "SG_PA_MOD_FILE", str(DATA / "pa_gain_mod.json")))
+PA_MOD_FORMAT = 1
+# what the modulation acts on, '+'-joined: 'data' (the data portion's complex
+# gain step) and/or 'b' (the cubic, data portion only). Default both.
+_PA_MOD_MODE = set(_os_sh.environ.get("SG_PA_MOD_MODE", "data+b").split("+"))
+
+
+# ── TX LO LEAKAGE, measured (DEFAULT since 2026-10-01; --old-leakage) ─────────
+# The log's lo_leakage_dbc searched +-5 Hz around the x^4 CFO, which reads about
+# 7 ppb low, so at 915 and 2400 it missed the tone (25-30 dB low at 2400) and
+# made the level look bimodal. Re-measured over every run of the generator's
+# sessions (analysis_scripts/remeasure_lo_leakage.py, build_lo_leakage_table.py):
+#   * the tone sits at the CFO plus a fleet constant per band (offset_hz:
+#     -0.54 / -0.60 / -1.19 Hz at 433 / 915 / 2400, p5-p95 within +-0.05 Hz);
+#   * runs are independent (lag-1 ~0.05) and unrelated to the CFO. The level is
+#     fitted per session like every other measured block: a robust Gaussian, or
+#     the two-component mixture where BIC clearly prefers it (gain-89 sessions
+#     with two states 10-17 dB apart);
+#   * the same file carries the precise per-run CFO (preamble-slope refined),
+#     which replaces the log's x^4 values.
+LEAK_FILE = Path(_os_sh.environ.get("SG_LEAK_FILE", str(DATA / "lo_leakage.json")))
+LEAK_FORMAT = 1
+
+
+def _leak_table(radio, token, cfg_dir):
+    """{'runs': {run: {'cfo_hz', 'leak_dbc'}}, 'offset_hz'} for one session, or None."""
+    d = _load_versioned(LEAK_FILE, LEAK_FORMAT)
+    runs = None if d is None else d["sessions"].get(f"{radio}/{token}/{cfg_dir}")
+    if not runs or sum(x["leak_dbc"] is not None for x in runs.values()) < 10:
+        return None
+    return {"runs": runs, "offset_hz": float(d["offset_hz"][cfg_dir.split("_")[1]])}
+
+
+def _pa_mod_params(cfg_dir):
+    """{'freq_hz', 'amp', 'b_amp'} for this config, or None."""
+    d = _load_versioned(PA_MOD_FILE, PA_MOD_FORMAT)
+    if d is None:
+        return None
+    c = d["configs"].get(cfg_dir)
+    return None if c is None else {"freq_hz": float(c["freq_hz"]), "amp": float(c["amp"]),
+                                   "b_amp": float(c.get("b_amp", 0.0))}
+
+
+def _rx_spur_params(cfg_dir):
+    """{'amps_rad': [...], 'phases_rad': [...]} for this config, or None."""
+    d = _load_versioned(RX_SPUR_FILE, RX_SPUR_FORMAT,
+                        why="Refusing to inject a spur written for a different contract.")
+    if d is None:
+        return None
+    c = d["configs"].get(cfg_dir)
+    if c is None:
+        return None
+    return {"amps_rad": [float(v) for v in c["amps_rad"]],
+            "phases_rad": [float(v) for v in c["phases_rad"]]}
 
 # v4 adds radial_* keys (a measured amplitude profile). They are NOT consumed
 # yet -- the loader reads only the phase keys, which v4 leaves byte-identical to
@@ -551,7 +745,9 @@ def fit_mixture_bic(x, dbic=-10.0, iters=400):
 # ════════════════════════════════════════════════════════════════════════════
 def profile_from_log(radio, config="77_433", radial_filler=False,
                      pa_gain_min=PA_GAIN_MIN,
-                     pn_level_mode="auto"):
+                     pn_level_mode="auto", continuous_pn=True, rx_spur=False,
+                     cubic_preamble=False, pa_clean=True, pa_mod=True,
+                     old_leakage=False):
     """Build a device profile + variation spec from the characterisation log.
 
     Everything here is measured. Values that need the raw IQ (ISI taps, PA) are
@@ -607,15 +803,40 @@ def profile_from_log(radio, config="77_433", radial_filler=False,
     fc = rows[0]["fc_hz"]
     col = lambda k: np.array([v[k] for v in rows if v.get(k) is not None], float)
 
-    cfo_ppm = col("cfo_hz") / (fc * 1e-6)
+    # MEASURED LEAKAGE + PRECISE CFO (default since 2026-10-01; --old-leakage =
+    # the log's values): see LEAK_FILE. Keyed by this session's token.
+    _skey = (_hit[0] if len(_sess) > 1 else next(iter(_sess)))
+    _leak = None if old_leakage else _leak_table(radio, _skey.rsplit("_", 1)[-1], cfg_dir)
+    _cfo_rows = [v for v in rows if v.get("cfo_hz") is not None]
+    cfo_ppm = np.array([v["cfo_hz"] for v in _cfo_rows], float) / (fc * 1e-6)
+    if _leak is not None:
+        # the precise CFO only where it covers EVERY run: a partly re-measured
+        # session (D:/repeat, every 4th run) would otherwise mix two estimators
+        _by_run = {r: x["cfo_hz"] for r, x in _leak["runs"].items()}
+        if all(v.get("run") in _by_run for v in _cfo_rows):
+            cfo_ppm = np.array([_by_run[v["run"]] for v in _cfo_rows], float) / (fc * 1e-6)
+            print(f"  CFO: precise per-run values for all {len(_cfo_rows)} runs (x^4 bias removed)")
+        else:
+            print(f"  CFO: precise values cover only {sum(v.get('run') in _by_run for v in _cfo_rows)}"
+                  f"/{len(_cfo_rows)} runs -- keeping the log's x^4 CFO for all of them")
+    elif not old_leakage:
+        print(f"  LEAKAGE: no entry for {radio}/{_skey}/{cfg_dir} in {LEAK_FILE.name} -- "
+              "using the log's leakage and x^4 CFO")
     clk_ppm = col("clock_mismatch_ppm")
 
     # LO leakage needs a ROBUST centre: failed estimates form a long low tail
     # (one radio: median -42.2 but mean -45.9, sd 7.2, p5 -62.7). Reject it,
     # then use median and an IQR sigma, which the tail cannot move.
-    lk = col("lo_leakage_dbc")
-    q1, q3 = np.percentile(lk, [25, 75])
-    lk = lk[lk > q1 - 3.0 * max(q3 - q1, 0.5)]
+    if _leak is not None:
+        # the RE-MEASURED levels (missed tones already excluded upstream). No
+        # tail rejection: at gain 89 a session's second state sits 10-17 dB
+        # below the first and would be cut as a "failed estimate".
+        lk = np.array([x["leak_dbc"] for x in _leak["runs"].values()
+                       if x["leak_dbc"] is not None], float)
+    else:
+        lk = col("lo_leakage_dbc")
+        q1, q3 = np.percentile(lk, [25, 75])
+        lk = lk[lk > q1 - 3.0 * max(q3 - q1, 0.5)]
 
     x = cfo_ppm - cfo_ppm.mean()
     phi = float(np.clip(np.corrcoef(x[:-1], x[1:])[0, 1], 0.0, 0.98)) \
@@ -628,23 +849,17 @@ def profile_from_log(radio, config="77_433", radial_filler=False,
     # the taps were fitted against a different settling than the one applied.
     # That mismatch is silent and produces plausible-looking output, so it raises.
     _mshape = _measured_shape(radio, cfg_dir)
-    _hamm = _mshape is not None and isinstance(tp.get("hammerstein"), dict)
-    if _mshape is not None and not _hamm:
-        raise SystemExit(
-            f"{radio}/{cfg_dir}: a MEASURED settling shape is in scope but no "
-            "'hammerstein' fit exists for it. Using j3's jointly-fitted taps "
-            "with the measured profile would inject one settling against taps "
-            "fitted for another. Run: "
-            f"python analysis_scripts/fit_hammerstein.py {radio} {cfg_dir}")
-    _htp = tp["hammerstein"] if _hamm else tp
-    # RIPPLE IN SCOPE supersedes both routes above. fit_with_ripple re-estimated
-    # taps, PA and settling with the ripple FIR folded into the design, using the
-    # FITTED settling cubic -- so the measured shape is forced off here, exactly
-    # as build_generalisation_set already does for a different reason. Mixing the
-    # measured shape with ripple_fit's taps would repeat the settling mismatch
-    # the _hamm guard above exists to prevent.
     _rip = _ripple_fir(cfg_dir)
+    # The settling route is resolved ONCE, in precedence order, and only the
+    # chosen route's requirements are checked (checking the measured-shape route
+    # before the ripple route had overridden it blocked e.g. 30BF795/89_2400).
     if _rip is not None:
+        # RIPPLE IN SCOPE supersedes both other routes. fit_with_ripple
+        # re-estimated taps, PA and settling with the ripple FIR folded into the
+        # design, using the FITTED settling cubic -- so the measured shape is
+        # forced off, exactly as build_generalisation_set already does for a
+        # different reason. Mixing the measured shape with ripple_fit's taps
+        # would repeat the settling mismatch the Hammerstein pairing prevents.
         if not isinstance(tp.get("ripple_fit"), dict):
             raise SystemExit(
                 f"{radio}/{cfg_dir}: a ripple curve is in scope for this config "
@@ -652,14 +867,38 @@ def profile_from_log(radio, config="77_433", radial_filler=False,
                 "WITHOUT it double-counts the band shape (+30% residual, better "
                 "on 0/40 fits). Run: python analysis_scripts/fit_with_ripple.py "
                 f"{cfg_dir}")
-        _mshape = None
-        _hamm = False
-        _htp = tp["ripple_fit"]
+        _mshape, _hamm, _htp = None, False, tp["ripple_fit"]
+    else:
+        _hamm = _mshape is not None and isinstance(tp.get("hammerstein"), dict)
+        if _mshape is not None and not _hamm:
+            raise SystemExit(
+                f"{radio}/{cfg_dir}: a MEASURED settling shape is in scope but no "
+                "'hammerstein' fit exists for it. Using j3's jointly-fitted taps "
+                "with the measured profile would inject one settling against taps "
+                "fitted for another. Run: "
+                f"python analysis_scripts/fit_hammerstein.py {radio} {cfg_dir}")
+        _htp = tp["hammerstein"] if _hamm else tp
     _pak = "cubic" if tp.get("pa_kind") == "cubic" else "rapp"
     # take b from the Hammerstein fit where it is in use, BEFORE the
     # resolvability gate below -- selecting it after the gate silently
     # bypasses it and re-enables a cubic the gate exists to suppress.
     _bsrc = _htp if (_hamm or _rip is not None) else tp
+    # CLEAN PA REFIT (DEFAULT since 2026-09-30; --no-pa-clean = ripple_fit):
+    # the joint least squares that produced ripple_fit's cubic does not pass
+    # the cubic through the taps and lets it compete with the settling
+    # polynomial. A fit of the generator's own forward chain, on the same
+    # session and runs, is 2-6 dB better there and gets the full gain-89 AM/PM
+    # span (61/79 % -> 105/100 %), and is never more than 0.34 dB worse on the
+    # radio's other session (analysis_scripts/refit_pa_clean_fleet.py, 122
+    # profiles). Settling stays at ripple_fit's -- the clean fit held it fixed.
+    # Profiles without a block (one-session radios) keep ripple_fit.
+    if pa_clean and not isinstance(tp.get("pa_clean"), dict):
+        print(f"  PA: {radio}/{cfg_dir} has no 'pa_clean' block -- using ripple_fit "
+              "(analysis_scripts/refit_pa_clean_fleet.py)")
+        pa_clean = False
+    if pa_clean:
+        _bsrc = tp["pa_clean"]
+        _htp = dict(_htp, lags=tp["pa_clean"]["lags"], c_inject=tp["pa_clean"]["c_inject"])
     _bre = float(_bsrc.get("pa_b_re", 0.0)); _bim = float(_bsrc.get("pa_b_im", 0.0))
     # Gate the PA on whether the cubic EXPLAINS anything, not on |b|. At 2400 the
     # drive sits far enough below saturation that b estimates ~zero, so its value
@@ -700,6 +939,25 @@ def profile_from_log(radio, config="77_433", radial_filler=False,
         raise SystemExit(f"no ISI taps for {radio}/{cfg_dir} — run "
                          f"fit_pa.py then fit_isi_taps.py first")
 
+    _curve = _pn_curve(radio, cfg_dir)
+    if continuous_pn and _curve is None:
+        # the default model and unavailable: refuse rather than quietly fall
+        # back to a different one
+        raise SystemExit(f"no phase-noise curve for {radio}/{cfg_dir} in "
+                         f"{PN_CURVES_FILE.name} (fit_pn_curve.py); "
+                         "--per-burst-pn uses the older per-burst mask")
+    if _curve is not None and _pn_shared:
+        # same rule as the mask above: where the per-radio level is not
+        # resolvable, the in-burst part takes the fleet mean (of the curves)
+        _curve = shift_pn_curve(_curve, float(np.mean(
+            [_curve_at(c, 1e4) for c in _pn_curve(None, cfg_dir)]))
+            - _curve_at(_curve, 1e4))
+    _rx_spur = _rx_spur_params(cfg_dir)
+    _pa_mod = _pa_mod_params(cfg_dir)
+    if rx_spur and _rx_spur is None:
+        raise SystemExit(f"--rx-spur requested but {RX_SPUR_FILE.name} has no "
+                         f"entry for {cfg_dir}")
+
     prof = {
         "radio": radio, "config": cfg_dir, "fc_hz": fc, "n_real_runs": len(rows),
         "ref_ppm": float(cfo_ppm.mean()),
@@ -712,6 +970,9 @@ def profile_from_log(radio, config="77_433", radial_filler=False,
         "iq_phase_deg": float(col("iq_phase_deg").mean()),
         "snr_db": float(col("snr_mean_db").mean()),
         "lo_leak_dbc": float(np.median(lk)),
+        # the leakage tone's frequency relative to the CFO (fleet constant per band)
+        "lo_leak_offset_hz": _leak["offset_hz"] if _leak is not None else 0.0,
+        "leak_source": "measured (lo_leakage.json)" if _leak is not None else "log",
         "rx_dc_frac": float(np.median(col("rx_dc_frac"))),
         # HAMMERSTEIN taps/PA where the settling is MEASURED rather than fitted.
         # fit_joint's c_inject and pa_b were estimated in one least squares WITH
@@ -756,14 +1017,20 @@ def profile_from_log(radio, config="77_433", radial_filler=False,
         # lands in the PREAMBLE -- 11.1 deg there vs 5.3 deg in-band at 89_2400.
         # See scratchpad/extrap_check.py. This is the leading explanation for the
         # sigma_t overshoot bottom-up saw on injection, because the pipeline
-        # phase-aligns each burst ON the preamble. Left as-is pending a joint
-        # decision: clamping to the fitted window is not obviously right either,
-        # since the true transient should be LARGER early in the burst.
+        # phase-aligns each burst ON the preamble. RESOLVED 2026-09-28: the
+        # preamble part is now MEASURED (PREAMBLE_FILE, _splice_preamble); the
+        # real transient does NOT keep growing towards the burst start -- it
+        # rises through the preamble (0.5 -> ~1 deg at 433, 3 -> ~6 at 2400).
+        # --cubic-preamble keeps the extrapolation.
         "settling": [list(v) for v in _htp.get("settling",
                                                tp.get("settling", []))],
         "ripple_fir": (None if _rip is None else
                        [[v.real, v.imag] for v in _rip]),
         # measured sampled profile where one exists; None falls back to the cubic
+        # measured preamble part of the transient, spliced onto the fitted
+        # cubic (None: --cubic-preamble, the measured-shape route, or no file)
+        "preamble_transient": (None if (cubic_preamble or _mshape is not None)
+                               else _preamble_transient(cfg_dir)),
         "settling_shape": (None if _mshape is None else
                            {"t": _mshape[0].tolist(),
                             "phi_deg": _mshape[1].tolist()}),
@@ -786,6 +1053,22 @@ def profile_from_log(radio, config="77_433", radial_filler=False,
         "pn_radial_pct": (float(tp.get("extra_radial_pct", 0.0))
                           if radial_filler else 0.0),
         "pn_radial_pct_fitted": float(tp.get("extra_radial_pct", 0.0)),
+        # ONE phase-noise curve, 1.5 Hz to fs/2 -- see PN_CURVES_FILE. Drawn as
+        # one continuous process per run when pn_continuous is True (default);
+        # with --per-burst-pn, pn_mask above is drawn per burst instead.
+        # pn_level_db shifts whichever is in use. The flag lives in the profile
+        # so profile.json records which model a dataset carries.
+        "pn_curve": _curve,
+        "pn_continuous": bool(continuous_pn),
+        # RECEIVER phase spur -- see RX_SPUR_FILE. Loaded whenever the config
+        # has one so --dry-run shows it; applied only when rx_spur_enabled.
+        "rx_spur": _rx_spur,
+        "rx_spur_enabled": bool(rx_spur),
+        # PA gain modulation (gain 89 only; see PA_MOD_FILE), applied only
+        # when pa_mod_enabled; pa_clean records which PA coefficients are in use
+        "pa_mod": _pa_mod,
+        "pa_mod_enabled": bool(pa_mod) and _pa_mod is not None,
+        "pa_clean": bool(pa_clean),
         # centre for the case where the clock is NOT derived from ref_ppm
         "clock_mismatch_ppm": float(clk_ppm.mean()),
     }
@@ -854,6 +1137,16 @@ def _pn_draw(amp, n, rng):
     return np.fft.irfft(amp * noise, n=n)
 
 
+def _child_rng(rng):
+    """An independent Generator derived from rng's CURRENT state WITHOUT
+    advancing it, so an opt-in feature cannot shift any other draw of the run.
+    (Generator.spawn does this too but needs numpy >= 1.25; requirements allow
+    1.24.) Deterministic: same seed and run -> same child."""
+    import hashlib
+    h = hashlib.sha256(repr(rng.bit_generator.state).encode()).digest()
+    return np.random.default_rng(int.from_bytes(h[:16], "little"))
+
+
 def _shift_lin(v, k):
     """v[n+k] with ZERO fill -- LINEAR, not circular (np.roll wraps)."""
     out = np.zeros_like(v)
@@ -886,21 +1179,15 @@ def _isi_wave(w, taps, lags):
 
 
 def _pa(x, pa):
-    """Memoryless PA. Normalised on the DATA portion, matching how it is fitted
-    -- a whole-burst rms pulls in the null tail and over-drives it."""
-    if pa["kind"] == "rapp" and pa["A"] < 100:
-        s0 = np.sqrt(np.mean(np.abs(x[DATA_START:DATA_END]) ** 2))
-        u = x / s0
-        u = u / np.power(1 + np.power(np.abs(u) / pa["A"], 2 * pa["p"]),
-                         1 / (2 * pa["p"]))
-        return u * (s0 / np.sqrt(np.mean(np.abs(u[DATA_START:DATA_END]) ** 2)))
-    if pa["kind"] == "cubic":
-        b = complex(pa["b_re"], pa["b_im"])
-        s0 = np.sqrt(np.mean(np.abs(x[DATA_START:DATA_END]) ** 2))
-        u = x / s0
-        u = u + b * u * np.abs(u) ** 2
-        return u * (s0 / np.sqrt(np.mean(np.abs(u[DATA_START:DATA_END]) ** 2)))
-    return x
+    """Memoryless PA, the library's fitted models (add_pa_nonlinearity
+    'cubic' / 'rapp'). Normalised on the DATA portion, matching how it is
+    fitted -- a whole-burst rms pulls in the null tail and over-drives it."""
+    if pa["kind"] not in ("rapp", "cubic"):
+        return x
+    return add_pa_nonlinearity(x, model=pa["kind"],
+                               b=complex(pa.get("b_re", 0.0), pa.get("b_im", 0.0)),
+                               A=pa.get("A", 1e6), p=pa.get("p", 3.0),
+                               norm_slice=slice(DATA_START, DATA_END))
 
 
 def synth_run(prof, var, rng, state, n_bursts):
@@ -911,7 +1198,9 @@ def synth_run(prof, var, rng, state, n_bursts):
     ahead of the pulse shaping: "ISI -> phase noise -> SRRC -> PA"):
 
       once per run   SRRC(ZC preamble + random QPSK)  [x settling, cubic route]
-      per burst      phase noise -> PA -> ISI -> [settling, measured route]
+      once per run   one phase-noise process across all bursts [not with --per-burst-pn]
+      per burst      phase noise (own draw, or the run's slice) -> PA -> ISI
+                     -> [settling, measured route]
                      -> [ripple FIR] -> IQ -> TX leakage -> CFO -> RX DC
                      -> timing -> AWGN
       once per run   BB60 decimation filter -> additive floor
@@ -1049,7 +1338,10 @@ def synth_run(prof, var, rng, state, n_bursts):
         _t, np.asarray(_shape["t"]), np.asarray(_shape["phi_deg"]))))
         if _shape else None)
     if _set_phase is None and _set:
-        base = base * (1.0 + sum(c * _t ** (m + 1) for m, c in enumerate(_set)))
+        _g = 1.0 + sum(c * _t ** (m + 1) for m, c in enumerate(_set))
+        if prof.get("preamble_transient"):
+            _g = _splice_preamble(_g, _t, prof["preamble_transient"])
+        base = base * _g
     # Placement note: applying this phase BEFORE the PA and ISI instead of
     # after was tested and changes NOTHING -- all seven end metrics identical
     # to 4 decimals. A profile this smooth commutes with a +-1 symbol ISI in
@@ -1062,6 +1354,24 @@ def synth_run(prof, var, rng, state, n_bursts):
     _x_samp = np.arange(BURST_LEN)
     _pn_amp = (_pn_amplitude(pn_mask, _n_sym, FS / SPS)
                if pn_mask is not None else None)
+    # CONTINUOUS PHASE NOISE (default): the radio's one curve, drawn ONCE for
+    # the whole run at symbol rate, so consecutive bursts share the slow part.
+    # Same shaping as the per-burst draw, just a longer record (~1M points for
+    # 762 bursts). Drawn from a CHILD generator, so it shifts no other draw:
+    # the two phase-noise models differ in their phase noise ONLY.
+    _pn_run = None
+    # PA gain modulation phase: one per run, from a child generator so the run's
+    # other draws are unchanged whether or not it is enabled
+    _pa_mod_phase = (float(_child_rng(np.random.default_rng(
+        _child_rng(rng).integers(2**63))).uniform(0, 2 * np.pi))
+        if prof.get("pa_mod_enabled") else None)
+    if prof.get("pn_continuous"):
+        assert BURST_SPACING % SPS == 0, "burst slots must sit on the symbol grid"
+        _slot = BURST_SPACING // SPS
+        _n_run = (n_bursts - 1) * _slot + _n_sym
+        _full = [(f, lv + p["pn_level_db"]) for f, lv in prof["pn_curve"]]
+        _pn_run = _pn_draw(_pn_amplitude(_full, _n_run, FS / SPS), _n_run,
+                           _child_rng(rng))
     # white noise through a filter h keeps sum(h^2) of its power (Parseval)
     # from the MEASURED response, not the Kaiser: the two differ by 1.68 dB
     # (0.5035 vs 0.7413) and this scales the AWGN so in-band noise lands on
@@ -1082,7 +1392,18 @@ def synth_run(prof, var, rng, state, n_bursts):
         # fit_phase_noise_mask: synthesising straight at sample rate would
         # extrapolate the mask far past the fitted 3k-150k band, and with a
         # shallow slope the variance integral is dominated by that extrapolation.
-        if pn_mask is not None:
+        if _pn_run is not None:
+            # this burst's slice of the run-long process, by its nominal slot.
+            # The clock-drift shift below moves bursts by <= ~12 samples.
+            ph = _pn_run[j * _slot:j * _slot + _n_sym]
+            b = b * np.exp(1j * np.interp(_x_samp, _x_sym, ph))
+            # ADVANCE THE MAIN STREAM EXACTLY AS THE PER-BURST DRAW WOULD, and
+            # discard it. Skipping it shifted every later draw -- this burst's
+            # AWGN and the NEXT run's parameters -- so the two modes differed in
+            # far more than their phase noise. Now they differ ONLY in that.
+            if _pn_amp is not None:
+                _pn_draw(_pn_amp, _n_sym, rng)
+        elif pn_mask is not None:
             ph = _pn_draw(_pn_amp, _n_sym, rng)
             b = b * np.exp(1j * np.interp(_x_samp, _x_sym, ph))
         elif pn["tangential_deg"] > 0:          # fallback: no mask fitted yet
@@ -1102,9 +1423,31 @@ def synth_run(prof, var, rng, state, n_bursts):
         # (as this did) is physically backwards, and it shows: feeding the
         # jointly-fitted coefficients through ISI->PA gives residual 0.158
         # against 0.015 for PA->ISI and 0.013 for the fit itself, a 12x penalty.
-        b = _pa(b, {"kind": prof["pa_kind"], "b_re": p["pa_b_re"],
-                    "b_im": p["pa_b_im"], "A": prof.get("pa_A", 1e6),
-                    "p": 3.0})
+        # this burst's PA-modulation phasor (see PA_MOD_FILE), shared by both parts
+        _rot = (np.exp(1j * (2 * np.pi * prof["pa_mod"]["freq_hz"] * j * BURST_SPACING / FS
+                             + _pa_mod_phase)) if _pa_mod_phase is not None else None)
+        _pa_par = {"kind": prof["pa_kind"], "b_re": p["pa_b_re"], "b_im": p["pa_b_im"],
+                   "A": prof.get("pa_A", 1e6), "p": 3.0}
+        _pa_in = b
+        b = _pa(_pa_in, _pa_par)
+        if _rot is not None and "b" in _PA_MOD_MODE:
+            # the PA's compression modulated per burst, on the DATA portion only,
+            # like the gain step below: the real preamble carries 0.35 % of the
+            # line, and letting the preamble through the modulated PA doubled the
+            # burst-to-burst preamble phase wander at 89_433 (pilot_full_chain.py,
+            # 2.6-3.0 deg against real 1.1-1.8). The PA is memoryless, so the
+            # splice at DATA_START is exact.
+            # ONLY ITS SHAPE: the modulated cubic also shifts the data portion's
+            # mean complex gain (AM/PM of b), and the gain step below already
+            # carries the WHOLE measured data-vs-preamble line -- keeping both
+            # counted it twice (pilot: 8.3 % line against real 4.9 % at 89_433).
+            # So its mean gain relative to the unmodulated output is projected
+            # out, as the lock c_b was measured: a column separate from the gain.
+            _db = prof["pa_mod"]["b_amp"] * _rot
+            _bm = _pa(_pa_in, dict(_pa_par, b_re=p["pa_b_re"] + _db.real,
+                                   b_im=p["pa_b_im"] + _db.imag))[DATA_START:]
+            b = b.copy()
+            b[DATA_START:] = _bm * (np.vdot(_bm, b[DATA_START:]) / np.vdot(_bm, _bm))
         b = _isi_wave(b, taps, lags)
         # measured settling: AFTER ISI, matching fit_hammerstein's removal
         if _set_phase is not None:
@@ -1112,8 +1455,20 @@ def synth_run(prof, var, rng, state, n_bursts):
         if _rip_fir is not None:
             b = np.convolve(b, _rip_fir, mode="same")
         b = b / np.sqrt(np.mean(np.abs(b[DATA_START:DATA_END]) ** 2))
+        # PA gain modulation: AFTER the per-burst normalisation, which would
+        # otherwise remove the magnitude part of it
+        if _rot is not None and "data" in _PA_MOD_MODE:
+            # the DATA portion's complex gain relative to the preamble: measured
+            # as a step at DATA_START (preamble 0.4 %, data ~5 % flat, same
+            # envelope), which is why it survives per-burst preamble alignment
+            b = b.copy()
+            b[DATA_START:] = b[DATA_START:] * (1.0 + prof["pa_mod"]["amp"] * _rot)
         b = add_iq_imbalance(b, IQ_SIGN * p["iq_amp_db"], p["iq_phase_deg"])
-        b = b + 10 ** (p["lo_leak_dbc"] / 20.0) * np.exp(1j * p["leak_phase_rad"])
+        # TX LO leakage: a tone lo_leak_offset_hz from the CFO (0 with
+        # --old-leakage), phase continuous across bursts
+        b = b + 10 ** (p["lo_leak_dbc"] / 20.0) * np.exp(1j * (
+            p["leak_phase_rad"] + 2 * np.pi * prof.get("lo_leak_offset_hz", 0.0) / FS
+            * (np.arange(len(b)) + j * BURST_SPACING)))
         # No per-burst CFO dither. It was added to break the estimator's 9.5367 Hz
         # quantisation, which parabolic interpolation in estimate_cfo now removes at
         # source -- verified: run-level sigma is identical with it on and off
@@ -1175,7 +1530,12 @@ def synth_run(prof, var, rng, state, n_bursts):
     # AWGN above was scaled up by 1/sum(h^2) so the IN-BAND noise -- which is
     # what snr_mean_db reads -- lands on target after the filter removes the
     # out-of-band part.
-    rx = scipy.signal.oaconvolve(rx, RX_FIR, mode="same").astype(np.complex64)
+    # RECEIVER phase spur (opt-in): on the receiver's oscillator, so it acts on
+    # everything that reaches it -- signal and noise -- before the anti-alias
+    # filter, indexed from the start of the capture.
+    if prof.get("rx_spur_enabled"):
+        rx = add_rx_spur(rx, prof["rx_spur"]["amps_rad"], prof["rx_spur"]["phases_rad"])
+    rx = add_decimation_filter(rx, FS, fir=RX_FIR).astype(np.complex64)
     # POST-FILTER floor, flat across the full band. Level is relative to the
     # IN-BAND NOISE, not to the signal: variance = thermal * 10^(FLOOR/10). See
     # the RX_FLOOR_DBC block for why the mechanism is NOT the converter.
@@ -1316,6 +1676,9 @@ def describe(prof, var):
             d = f"scipy.stats.{s.get('dist')} {s.get('params', {})}"
         else:
             d = _k
+        if k == "lo_leak_dbc":
+            d += (f"   [{prof.get('leak_source', 'log')}, tone at CFO "
+                  f"{prof.get('lo_leak_offset_hz', 0.0):+.2f} Hz]")
         print(f"  {k:<18}{prof.get(k, 0.0):>14.5g}   {d}")
     if prof.get("ripple_fir"):
         _rf = np.array([complex(a, b) for a, b in prof["ripple_fir"]])
@@ -1348,13 +1711,43 @@ def describe(prof, var):
     elif prof.get("settling"):
         _s = [complex(a, b_) for a, b_ in prof["settling"]]
         print(f"  {'settling':<18}{'':>14}   fitted complex cubic, |profile| "
-              f"span {abs(sum(_s)):.4f}  [extrapolates into the preamble]")
-    if prof.get("pn_mask"):
-        print(f"  {'pn':<18}{'':>14}   1/f^a mask, slope "
+              f"span {abs(sum(_s)):.4f}  on the data portion; preamble "
+              + ("MEASURED profile (srrc_preamble_transient.json)"
+                 if prof.get("preamble_transient")
+                 else "EXTRAPOLATED cubic (--cubic-preamble)"))
+    if prof.get("pa_mod"):
+        print(f"  {'pa gain mod':<18}{'':>14}   {100 * prof['pa_mod']['amp']:.2f} % at "
+              f"{prof['pa_mod']['freq_hz']:+.2f} Hz (burst rate), fleet   "
+              + ("INJECTED" if prof.get("pa_mod_enabled") else "off (--no-pa-mod)"))
+    if prof.get("pa_clean"):
+        print(f"  {'pa coefficients':<18}{'':>14}   CLEAN refit (pa_clean block), "
+              f"b {prof['pa_b_re']:+.4f}{prof['pa_b_im']:+.4f}j")
+    else:
+        print(f"  {'pa coefficients':<18}{'':>14}   ripple_fit (joint least squares)"
+              f" -- --no-pa-clean, or no pa_clean block")
+    if prof.get("rx_spur"):
+        _a = np.degrees(prof["rx_spur"]["amps_rad"])
+        print(f"  {'rx spur':<18}{'':>14}   receiver PM, 1168-sample period "
+              f"(4280.8 Hz): {_a[0]:.3f} / {_a[1]:.3f} deg peak (fund. / 2nd), "
+              f"fleet   " + ("INJECTED" if prof.get("rx_spur_enabled")
+                             else "off (enable with --rx-spur)"))
+    if prof.get("pn_mask") and not prof.get("pn_continuous"):
+        print(f"  {'pn':<18}{'':>14}   1/f^a mask, per burst, slope "
               f"{prof.get('pn_slope_db_dec', 0):+.2f} dB/dec, level "
               f"{prof['pn_mask'][2][1]:.1f} dB @10 kHz"
               + ("   [FLEET MEAN -- per-radio level not resolvable]"
                  if prof.get("pn_level_shared") else "   [per-radio]"))
+    if prof.get("pn_curve"):
+        print(f"  {'pn curve':<18}{'':>14}   S_phi dB(rad^2/Hz), slow part fleet, "
+              f"in-burst part "
+              + ("FLEET MEAN" if prof.get("pn_level_shared") else "this radio")
+              + ":   " + ("USED, one continuous draw per run"
+                          if prof.get("pn_continuous")
+                          else "not used (--per-burst-pn)"))
+        _c = prof["pn_curve"]
+        for i in range(0, len(_c), 7):
+            print(f"  {'':<18}{'':>14}   " + "  ".join(
+                f"{f:g}Hz {lv:.1f}" for f, lv in _c[i:i + 7]))
     print(f"  {'pn (diag)':<18}{'':>14}   {prof['pn_tangential_deg']:.3f} deg "
           f"tangential gap left by the ISI taps (NOT injected)")
     print(f"  {'':<18}{'':>14}   {prof['pn_radial_pct']:.3f} % radial injected"
@@ -1374,11 +1767,49 @@ def main(argv=None):
     ap.add_argument("--out", default=None, help="output sweep directory")
     ap.add_argument("--radial-filler", action="store_true",
                     help="inject the unmodelled radial remainder (off by default)")
+    ap.add_argument("--per-burst-pn", action="store_true",
+                    help="the PREVIOUS phase-noise model: the in-burst 1/f^a mask "
+                         "drawn independently per burst (no burst-to-burst LO "
+                         "wander). Reproduces datasets made before 2026-09-27 bit "
+                         "for bit. Default: one curve, one continuous draw per run")
+    ap.add_argument("--cubic-preamble", action="store_true",
+                    help="the PREVIOUS burst transient in the preamble: the data-"
+                         "portion cubic extrapolated backwards (1.4-1.6x the real "
+                         "preamble offset). Default: the measured preamble profile")
+    # accepted for old command lines; continuous is the default now
+    ap.add_argument("--continuous-pn", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--no-pa-clean", dest="pa_clean", action="store_false", default=True,
+                    help="use ripple_fit's PA cubic + taps (the joint least squares) "
+                         "instead of the clean refit (pa_clean block, fitted through the "
+                         "generator's own chain; ON by default since 2026-09-30). "
+                         "Reproduces earlier datasets")
+    # accepted for old command lines; the clean refit is the default now
+    ap.add_argument("--pa-clean", dest="pa_clean", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--no-pa-mod", dest="pa_mod", action="store_false", default=True,
+                    help="leave out the gain-89 PA modulation (fleet-common data-portion "
+                         "gain + cubic modulation at -2.15 / -2.38 Hz, 433 / 915 MHz; ON by "
+                         "default since 2026-09-30). Reproduces earlier datasets")
+    # accepted for old command lines; the modulation is on by default now
+    ap.add_argument("--pa-mod", dest="pa_mod", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--old-leakage", action="store_true",
+                    help="the PREVIOUS TX LO leakage and CFO: the characterisation log's "
+                         "values (leakage read +-5 Hz around the biased x^4 CFO, as a "
+                         "fitted mixture; x^4 CFO). Default since 2026-10-01: the level's "
+                         "distribution fitted to the re-measured runs, the tone at the CFO "
+                         "plus the band offset, and the precise CFO (data/lo_leakage.json)")
+    ap.add_argument("--rx-spur", action="store_true",
+                    help="add the BB60 receiver's phase spur (1168-sample period, "
+                         "phase fixed to the capture start) as real captures carry "
+                         "it (off by default; the fitted parameters exclude it)")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the profile and variation spec, write nothing")
     a = ap.parse_args(argv)
 
-    prof, var = profile_from_log(a.radio, a.config, a.radial_filler)
+    prof, var = profile_from_log(a.radio, a.config, a.radial_filler,
+                                 continuous_pn=not a.per_burst_pn, rx_spur=a.rx_spur,
+                                 cubic_preamble=a.cubic_preamble,
+                                 pa_clean=a.pa_clean, pa_mod=a.pa_mod,
+                                 old_leakage=a.old_leakage)
     describe(prof, var)
     if a.dry_run:
         print("\n--dry-run: nothing written.")
