@@ -91,7 +91,7 @@ fc = col("fc_hz").mean()
 # distribution synth_dataset actually samples.
 import os as _os                    # noqa: E402
 _os.environ["SG_SESSION"] = sess
-_PROF, _VAR = SD.profile_from_log(RAD, CFG)
+_PROF, _VAR = SD.profile_from_log(RAD, CFG, fingerprint_only=False)
 _LEAK = SD._leak_table(RAD, sess, CFG)
 if _LEAK is not None:               # the precise per-run CFO the generator uses
     _by_run = {r: x["cfo_hz"] for r, x in _LEAK["runs"].items()}

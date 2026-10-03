@@ -571,6 +571,12 @@ SG_SUBSET = _sg_subset()
 # Minimum residual improvement for the cubic PA to be believed at all.
 # Below this the coefficient is fit noise and b is forced to zero.
 PA_GAIN_MIN = 1.30
+# configs where the clean PA refit overrides the gate (see profile_from_log)
+PA_GATE_EXEMPT = ("89_2400",)
+# FINGERPRINT-ONLY variation (_fleet_nuisance): run-to-run CFO sd multiplier,
+# and how far below the fleet's p10 SNR the per-run SNR draw extends (dB)
+FP_CFO_WIDEN = 3.0
+FP_SNR_DROP_DB = 10.0
 # Minimum (cross-radio spread)/(run-to-run noise) for the per-radio phase-noise
 # LEVEL to be believed. Below it every radio gets the FLEET MEAN level, because
 # injecting differences the measurement cannot resolve hands a classifier a
@@ -678,6 +684,11 @@ def draw(spec, centre, rng, state=None):
         v = _d.rvs(**spec.get("params", {}), random_state=rng)
         if spec.get("relative"):
             v = centre + v
+    elif kind == "quantile":
+        # an EMPIRICAL distribution, as evenly spaced quantiles (q[0] = min,
+        # q[-1] = max): inverse-CDF sampling, linear between quantiles
+        q = np.asarray(spec["q"], float)
+        v = float(np.interp(rng.uniform(), np.linspace(0.0, 1.0, q.size), q))
     else:
         raise ValueError(f"unknown variation kind {kind!r}")
     # PHYSICAL bounds, hoisted out of the gauss branch so every unbounded kind
@@ -747,11 +758,15 @@ def profile_from_log(radio, config="77_433", radial_filler=False,
                      pa_gain_min=PA_GAIN_MIN,
                      pn_level_mode="auto", continuous_pn=True, rx_spur=False,
                      cubic_preamble=False, pa_clean=True, pa_mod=True,
-                     old_leakage=False):
+                     old_leakage=False, fingerprint_only=True,
+                     pa_gate_2400=False, snr_drop_db=None):
     """Build a device profile + variation spec from the characterisation log.
 
     Everything here is measured. Values that need the raw IQ (ISI taps, PA) are
     read from isi_taps.json, written by fit_isi_taps.py / fit_pa.py.
+
+    fingerprint_only (default): only the device-fixed impairments stay per
+    radio; the rest are drawn from the fleet (see _fleet_nuisance).
     """
     cfg_dir = config.lstrip("g")
     cfg_key = f"g{cfg_dir}"
@@ -911,7 +926,14 @@ def profile_from_log(radio, config="77_433", radial_filler=False,
     # PA_GAIN_MIN sits at the midpoint of that empty gap.
     _cg = (tp.get("pa_cubic_vs_linear", 0.0) / tp["pa_cubic_residual"]
            if tp.get("pa_cubic_residual") else 0.0)
-    if _pak == "cubic" and _cg < pa_gain_min:
+    # EXCEPT 89_2400 under the clean refit (default since 2026-10-03;
+    # --gate-pa-2400 = gated). The gate ratio there is 1.08-1.20 because the old
+    # joint fit could not separate the cubic from the settling, but the clean
+    # refit pins it: |b| 0.010-0.015 at a common angle (~148 deg) on all 24
+    # radios, and +1.79 dB better on held-out runs for 24/24. Its taps were also
+    # fitted WITH that cubic in the chain, so zeroing b broke the pairing.
+    _exempt = pa_clean and not pa_gate_2400 and cfg_dir in PA_GATE_EXEMPT
+    if _pak == "cubic" and _cg < pa_gain_min and not _exempt:
         _bre = _bim = 0.0
     # ── phase-noise level: per-radio only where it is RESOLVABLE ────────────
     # Bottom-up's CW measurement (four decades, GPSDO) found the level is a real
@@ -1097,7 +1119,60 @@ def profile_from_log(radio, config="77_433", radial_filler=False,
     # centre for the independent-clock case; sd from the log, so switching
     # clock_mismatch_ppm to 'gauss' or 'ar1' works without further edits
     var["clock_mismatch_ppm"].setdefault("sd", float(clk_ppm.std()))
+    if fingerprint_only:
+        _src = ("pa_clean" if pa_clean else "ripple_fit" if _rip is not None
+                else "hammerstein" if _hamm else None)
+        _fleet_nuisance(prof, var, log, cfg_dir, _src,
+                        FP_SNR_DROP_DB if snr_drop_db is None else snr_drop_db)
     return prof, var
+
+
+def _fleet_nuisance(prof, var, log, cfg_dir, taps_src, snr_drop_db):
+    """FINGERPRINT-ONLY variation (default since 2026-10-03; --per-radio-nuisance
+    = the per-radio spec). What re-capture showed to be device-fixed stays per
+    radio: CFO / clock (99.5 % device), TX LO leakage, the PA cubic, the PN
+    level. Everything else is drawn from the WHOLE FLEET each run, so a
+    classifier cannot identify a radio by it:
+      isi_taps        another radio's fitted taps, per run. The taps track the
+                      capture DAY, not the device (0 % device across sessions),
+                      so a per-radio set teaches the capture day.
+      iq_amp/phase    the fleet's per-run values (quantiles): 11-18 % device,
+                      mostly run noise.
+      rx_dc_frac      the fleet's per-run values: receiver, not transmitter.
+      snr_db          uniform from snr_drop_db below the fleet's p10 up to its
+                      p90: SNR is setup, and the extra noise masks the fine
+                      time-domain detail the generator under-reproduces
+                      (burst-to-burst deviation 0.5-2.5 dB too clean).
+      ref_ppm         sd x FP_CFO_WIDEN, a margin for session-to-session drift
+                      that the training session cannot measure (a choice, not a
+                      fit: the device spread is ~0.9 ppm, so radios stay apart).
+    The pools come from the characterisation log and taps file in use, so with
+    SG_DATA_DIR=data_july they hold training-session data only.
+    """
+    rows = [v for k, v in log.items()
+            if len(k.split("/")) == 3 and k.split("/")[1] == f"g{cfg_dir}"]
+    q = np.linspace(0, 100, 101)
+    for k_var, k_log in (("iq_amp_db", "iq_amp_db"), ("iq_phase_deg", "iq_phase_deg"),
+                         ("rx_dc_frac", "rx_dc_frac")):
+        x = np.array([v[k_log] for v in rows if v.get(k_log) is not None], float)
+        var[k_var] = {"kind": "quantile", "q": [float(z) for z in np.percentile(x, q)],
+                      "source": f"fleet, {len(x)} runs"}
+    s = np.array([v["snr_mean_db"] for v in rows if v.get("snr_mean_db") is not None], float)
+    var["snr_db"] = {"kind": "uniform", "lo": float(np.percentile(s, 10) - snr_drop_db),
+                     "hi": float(np.percentile(s, 90))}
+    var["ref_ppm"]["sd"] = var["ref_ppm"]["sd"] * FP_CFO_WIDEN
+    lags = prof["isi_taps"]["lags"]
+    pool, names = [], []
+    for k, tp in sorted(json.loads(TAPS.read_text()).items()):
+        if not k.endswith(f"/{cfg_dir}"):
+            continue
+        b = tp.get(taps_src) if taps_src else tp
+        if isinstance(b, dict) and b.get("c_inject") is not None and \
+                list(b.get("lags", tp.get("lags", []))) == list(lags):
+            pool.append([[c[0], c[1]] for c in b["c_inject"]])
+            names.append(k.split("/")[0])
+    if len(pool) >= 2:
+        var["isi_taps"] = {"kind": "pool", "pool": pool, "radios": names}
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1190,8 +1265,12 @@ def _pa(x, pa):
                                norm_slice=slice(DATA_START, DATA_END))
 
 
-def synth_run(prof, var, rng, state, n_bursts):
+def synth_run(prof, var, rng, state, n_bursts, data_symbols=None):
     """One run: draw its parameters, then build the burst train.
+
+    data_symbols (optional): the run's N_DATA QPSK symbols, e.g. recovered
+    from a real TX file, to rebuild that capture through the chain. The random
+    symbol draw still happens, so every other draw is unchanged.
 
     IMPAIRMENT ORDER (corrected 2026-09-10 -- the old docstring here described a
     chain this function stopped running some time ago, claiming symbol-level ISI
@@ -1266,6 +1345,11 @@ def synth_run(prof, var, rng, state, n_bursts):
         r = _ts["rel_sd"]
         taps = [c + complex(rng.normal(0, r * abs(c)), rng.normal(0, r * abs(c)))
                 for c in taps]
+    elif _ts.get("kind") == "pool":
+        # one fitted tap set per run, from any radio (fingerprint-only); the
+        # index goes into the ground truth
+        p["isi_taps_pool_index"] = int(rng.integers(len(_ts["pool"])))
+        taps = [complex(a, b) for a, b in _ts["pool"][p["isi_taps_pool_index"]]]
     pn = {"tangential_deg": p["pn_tangential_deg"],
           "radial_pct": p["pn_radial_pct"]}
     # mask levels are dB, so the knob is an offset
@@ -1277,6 +1361,9 @@ def synth_run(prof, var, rng, state, n_bursts):
     # the same ZC every burst of every run.
     pre = PREAMBLE
     data = IDEAL[rng.integers(0, 4, N_DATA)]
+    if data_symbols is not None:            # a given sequence; the draw above keeps the stream
+        data = np.asarray(data_symbols, complex)
+        assert data.shape == (N_DATA,), f"data_symbols must have {N_DATA} symbols"
     # ISI is applied per burst now, AFTER the PA (see below). It is still
     # deterministic given this run's symbols, so the deviation still repeats.
     #
@@ -1674,6 +1761,9 @@ def describe(prof, var):
                 for w, m, sd in zip(s["w"], s["mu"], s["sd"])))
         elif _k == "scipy":
             d = f"scipy.stats.{s.get('dist')} {s.get('params', {})}"
+        elif _k == "quantile":
+            d = (f"empirical, p5..p95 [{s['q'][5]:.4g}, {s['q'][95]:.4g}]"
+                 f"  ({s.get('source', '')})")
         else:
             d = _k
         if k == "lo_leak_dbc":
@@ -1689,7 +1779,12 @@ def describe(prof, var):
         print(f"  {'ripple':<18}{'':>14}   common-mode FIR, {len(_rf)} taps, "
               f"{_db.std():.4f} dB rms in band")
     t = prof["isi_taps"]
-    print(f"  {'isi_taps':<18}{'':>14}   fixed, {len(t['lags'])} complex taps")
+    _tv = var.get("isi_taps", {})
+    if _tv.get("kind") == "pool":
+        print(f"  {'isi_taps':<18}{'':>14}   POOLED: one of {len(_tv['pool'])} radios' "
+              f"fitted sets per run (fingerprint-only); this radio's own:")
+    else:
+        print(f"  {'isi_taps':<18}{'':>14}   fixed, {len(t['lags'])} complex taps")
     for k, c in zip(t["lags"], t["c"]):
         z = complex(c[0], c[1])
         print(f"      lag {k:+d}   {20*np.log10(max(abs(z),1e-12)):+7.2f} dBc"
@@ -1801,6 +1896,17 @@ def main(argv=None):
                     help="add the BB60 receiver's phase spur (1168-sample period, "
                          "phase fixed to the capture start) as real captures carry "
                          "it (off by default; the fitted parameters exclude it)")
+    ap.add_argument("--per-radio-nuisance", action="store_true",
+                    help="the PREVIOUS variation spec: ISI taps, IQ imbalance, RX DC and "
+                         "SNR per radio at the measured spread, CFO at its measured spread. "
+                         "Default since 2026-10-03: fingerprint-only -- those drawn from "
+                         "the fleet, SNR extended FP_SNR_DROP_DB lower, CFO spread x3")
+    ap.add_argument("--snr-drop-db", type=float, default=None,
+                    help=f"fingerprint-only: how far below the fleet's p10 SNR the "
+                         f"per-run draw reaches (default {FP_SNR_DROP_DB:g} dB)")
+    ap.add_argument("--gate-pa-2400", action="store_true",
+                    help="the PREVIOUS 89_2400 PA: cubic gated off. Default since "
+                         "2026-10-03: the clean refit's cubic is injected there")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the profile and variation spec, write nothing")
     a = ap.parse_args(argv)
@@ -1809,7 +1915,9 @@ def main(argv=None):
                                  continuous_pn=not a.per_burst_pn, rx_spur=a.rx_spur,
                                  cubic_preamble=a.cubic_preamble,
                                  pa_clean=a.pa_clean, pa_mod=a.pa_mod,
-                                 old_leakage=a.old_leakage)
+                                 old_leakage=a.old_leakage,
+                                 fingerprint_only=not a.per_radio_nuisance,
+                                 pa_gate_2400=a.gate_pa_2400, snr_drop_db=a.snr_drop_db)
     describe(prof, var)
     if a.dry_run:
         print("\n--dry-run: nothing written.")

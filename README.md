@@ -2,7 +2,7 @@
 
 **Note: Claude (Anthropic) assisted with coding, analysis, and documentation formatting. Measurements, modeling, and validation are original author work.**
 
-Generates synthetic SRRC-QPSK captures in SigMF format from measured profiles of 23 real USRP B210 transmitters. Hardware impairments are fitted from real captures; device-specific traits stay fixed while run-specific variations are redrawn. Output matches the real capture layout, so the same analysis code reads real and synthetic data.
+Generates synthetic SRRC-QPSK captures in SigMF format from measured profiles of 23 real USRP B210 transmitters. Hardware impairments are fitted from real captures. By default only the device-fixed ones stay per radio; everything else is drawn from the whole fleet on every run. Output matches the real capture layout, so the same analysis code reads real and synthetic data.
 
 Sample dataset (full set pending a storage solution): https://drive.google.com/drive/folders/1A3LalT3Ojt_YU07PwynkjhlF8aStcJZV?usp=sharing
 
@@ -39,6 +39,9 @@ python synth_dataset.py --radio 30BF7B6 --config 77_433 --runs 2 --bursts 6 --ou
 | Flag | Effect |
 | :--- | :--- |
 | `--rx-spur` | Add the BB60 receiver's phase spur, which real captures carry (off by default). |
+| `--snr-drop-db X` | How far below the fleet's lowest measured SNR the per-run SNR reaches (default 10 dB). |
+| `--per-radio-nuisance` | Previous variation: every impairment at this radio's own measured spread. |
+| `--gate-pa-2400` | Previous PA at gain 89, 2400 MHz: cubic switched off. |
 | `--per-burst-pn` | Previous phase-noise model: an independent draw per burst. |
 | `--cubic-preamble` | Previous burst transient: the fitted cubic extrapolated over the preamble. |
 | `--no-pa-clean` | Previous PA fit (joint least squares). |
@@ -46,6 +49,17 @@ python synth_dataset.py --radio 30BF7B6 --config 77_433 --runs 2 --bursts 6 --ou
 | `--old-leakage` | Previous TX LO leakage and carrier offset. |
 
 The opt-out flags reproduce earlier output bit for bit; [`CHANGELOG.md`](CHANGELOG.md) says which flag goes with which version.
+
+### Fingerprint-only variation (default)
+
+Re-capturing the same radios weeks later showed which impairments belong to the device. Those stay per radio; the rest are drawn from the whole fleet, so a classifier trained on the output has to rely on the device.
+
+| Per radio (fingerprint) | Drawn from the fleet each run |
+| :--- | :--- |
+| Carrier and clock offset (spread ×3 for drift between sessions) | ISI taps: they follow the capture day, not the radio |
+| TX LO leakage | IQ imbalance: mostly run-to-run noise |
+| PA cubic | Receiver DC |
+| Phase-noise level | SNR, extended 10 dB below anything measured |
 
 ### Output layout
 
@@ -64,7 +78,7 @@ out/77_433/
 
 <p align="center"><img src="figures/signal_chain.png" width="520" alt="Signal chain: transmit path (phase noise, PA, ISI, burst transient, IQ imbalance, TX leakage) then receive path (CFO, RX DC, sampling clock, AWGN, BB60 filter, ADC floor)"></p>
 
-Fitted blocks are held fixed per radio; measured blocks are redrawn each run from that radio's measured spread; constant blocks belong to the receiver. Not drawn: the gain-89 PA modulation (inside the PA), the measured preamble transient (inside the burst transient), the leakage tone's small offset from the CFO, and the receiver spur (`--rx-spur`).
+Fitted blocks are held fixed per radio; measured blocks are redrawn each run; constant blocks belong to the receiver. The figure shows the per-radio spec (`--per-radio-nuisance`); by default the ISI taps, IQ imbalance, receiver DC and SNR come from the fleet instead (see Quickstart). Not drawn: the gain-89 PA modulation (inside the PA), the measured preamble transient (inside the burst transient), the leakage tone's small offset from the CFO, and the receiver spur (`--rx-spur`).
 
 | Data file | What it sets |
 | :--- | :--- |
@@ -83,7 +97,7 @@ Each fitted file records the measurements it came from and how. `rx_spur.py` est
 
 ## Results
 
-One radio, 30BF7B6, in all six configurations: a real capture against the generator's default output, demodulated the same way. The real capture has the receiver spur removed, since the generator leaves it out by default.
+One radio, 30BF7B6, in all six configurations: a real capture against the generator's output for that radio (`--per-radio-nuisance`, so SNR and the other nuisance terms are the radio's own), demodulated the same way. The real capture has the receiver spur removed, since the generator leaves it out by default.
 
 **Spectrum.** The in-band shape, the noise floor and, at gain 89 (433 and 915 MHz), the PA's spectral regrowth all line up.
 
@@ -111,11 +125,13 @@ Each parameter in the variation spec has a `kind`:
 | `gauss` | Gaussian at the measured spread, optionally bounded. |
 | `ar1` | Gaussian that wanders across runs (memory set by `phi`). |
 | `mixture` | Gaussian mixture (e.g. TX LO leakage in gain-89 sessions with two states). |
+| `quantile` | Empirical distribution given by its percentiles (the fleet's IQ imbalance and receiver DC). |
+| `pool` | One of a list of fitted vectors (the fleet's ISI tap sets). |
 | `scipy` | Any `scipy.stats` distribution, by name. |
 
 ## Known limitations
 
-- **Gain 89 is slightly too clean.** The burst-to-burst deviation is about 2 dB below real, and the AM/AM droop is off by 0.1–0.35 dB.
+- **Bursts are slightly too clean.** The burst-to-burst deviation is 0.5–1 dB below real at gain 77 and 1–2.5 dB at gain 89, and the gain-89 AM/AM droop is off by 0.2–0.35 dB. The default's wider SNR range masks this.
 - **In-burst frequency pull is not modelled.** While transmitting data, real radios sit about 7 ppb below their long-term frequency.
 - **Phase noise above ~200 kHz** is below the thermal noise at 2400 MHz and on some 89_433 radios, so there the curve is set by the total in-burst variance and a no-rise constraint.
 - **A few profiles carry wideband tangential noise that is not LO phase noise** (30BF7C1/89_433, and milder 30ECB71/89_915); one curve reproduces 0.82–0.90× of it.

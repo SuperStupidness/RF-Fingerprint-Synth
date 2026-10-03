@@ -141,7 +141,7 @@ def main(argv=None):
             for radio, sess in sessions.items():
                 os.environ['SG_SESSION'] = sess.split('_')[-1]
                 try:
-                    prof, var = sd.profile_from_log(radio, c, continuous_pn=cont)
+                    prof, var = sd.profile_from_log(radio, c, continuous_pn=cont, fingerprint_only=False)
                 except SystemExit:               # generator guard, or no curve
                     continue
                 for seed in range(a.seeds):
