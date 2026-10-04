@@ -1,5 +1,6 @@
 numpy>=1.24
 scipy>=1.10
+pyfftw>=0.13
 
 # getting_started.ipynb only
 matplotlib>=3.6

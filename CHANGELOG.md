@@ -2,6 +2,29 @@
 
 Newest first. Where the default output changes, the listed flag reproduces the previous output bit for bit.
 
+## 2026-10-04
+
+**Default output changes: the burst transient, the ISI and the receive filter.** Previous output: `--full-transient --raw-taps --bb60-passband`.
+
+### Changed
+- The burst transient is one fleet shape per config scaled by a per-radio level, `transient_level_deg` (its rms phase swing over the data). It replaces each radio's six complex-cubic coefficients, which are kept in the profile as `settling_fitted`.
+- The ISI (the post-PA linear response) is one fleet response per config, slid in frequency by a per-radio `isi_shift_khz`. It replaces each radio's two complex taps, which are kept as `isi_taps_fitted`. In fingerprint mode the shift is drawn per run from a Gaussian at the fleet spread, instead of picking one of the fleet's tap sets.
+- The BB60 receive filter's passband is flattened when the data folder's fits already contain it (the fitted taps absorbed its +0.4 dB rise at 500 kHz, so it was counted twice). The measured filter is used when the fits were made with the passband divided out (`_bb60_equalised` in the ripple file).
+- **Shipped data refitted.** `data/` now holds all 24 radios, each from its first capture session only (fits and per-run measurements from the same session), fitted with the BB60 passband divided out of the captures, so the generator uses the measured receive filter. Not reproducible by a flag: the previous `data/` is in the repository history.
+- `data/fitted_blocks_30BF779_89_433.npz` and the README result figures rebuilt from the new data.
+
+### Added
+- `--full-transient`, `--raw-taps`, `--bb60-passband`.
+- `transient_level_deg` and `isi_shift_khz` as variation-spec knobs.
+- `gauss` variations take an optional absolute centre `mu`.
+
+### Fixed
+- Per-symbol ISI was about 20% too small, and the gain-89, 2400 MHz amplitude distribution had lost its two peaks: the receive-filter double counting above.
+- `analysis_scripts/fit_pn_curve.py` combines runs by median. One broken run measurement (symbol timing near its wrap) had set 30BF779/89_2400's curve about 3x too high in variance.
+- The CFO drift margin counted only 22 of 24 radios (two sessions carry the wrong `tx_serial`); it now reads the radio from the session key (0.050 -> 0.047 ppm).
+- Bundled library: `_sinc_interp` works in chunks, about 1.8x faster, bit-identical output.
+- `requirements.txt` now lists `pyfftw`, which `cel_signal_gen_lib/impairments/hardware.py` imports. A clean environment could not import the generator without it.
+
 ## 2026-10-03
 
 **Default output changes.** Previous output: `--per-radio-nuisance --gate-pa-2400`.
@@ -9,7 +32,7 @@ Newest first. Where the default output changes, the listed flag reproduces the p
 ### Changed
 - Variation is now fingerprint-only. Carrier/clock offset, TX LO leakage, PA cubic and phase-noise level stay per radio. ISI taps, IQ imbalance and receiver DC are drawn from the whole fleet each run.
 - SNR is drawn per run over a wider range, reaching 10 dB below the fleet's measured values.
-- The carrier offset's run-to-run spread is 3× wider.
+- The carrier offset's run-to-run spread includes the reference drift measured over a capture session (fleet 90th percentile), and runs are drawn independently.
 - The PA cubic is now applied at 89_2400.
 
 ### Added

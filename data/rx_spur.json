@@ -15,149 +15,130 @@
  "model": "phi(n) = sum_h amps_rad[h] * sin(2 pi h n / 1168 + phases_rad[h]), h = 1, 2; n = capture sample index from 0. Applied before the anti-alias filter.",
  "estimator": "rx_spur.estimate_rx_spur (data-aided, self-referencing on the burst average). Round trip: 1.4 deg recovered within 1-2%, 0.25 deg within 8-16% (low); floor 0.02-0.05 deg.",
  "source": {
-  "captures": 799,
+  "captures": 720,
   "sessions": [
    "4QAM_30BF779_sweep_20260729_105201",
-   "4QAM_30BF779_sweep_20260818_200707",
    "4QAM_30BF795_sweep_20260803_104619",
-   "4QAM_30BF795_sweep_20260818_212116",
    "4QAM_30BF796_sweep_20260728_144044",
-   "4QAM_30BF796_sweep_20260818_183128",
    "4QAM_30BF7A4_sweep_20260724_162509",
-   "4QAM_30BF7A4_sweep_20260819_122839",
    "4QAM_30BF7AB_sweep_20260724_212808",
-   "4QAM_30BF7AB_sweep_20260819_202741",
    "4QAM_30BF7B6_sweep_20260724_151010",
-   "4QAM_30BF7B6_sweep_20260821_083016",
    "4QAM_30BF7BE_sweep_20260728_134306",
-   "4QAM_30BF7BE_sweep_20260819_134716",
    "4QAM_30BF7C1_sweep_20260803_092130",
-   "4QAM_30BF7C1_sweep_20260819_220350",
    "4QAM_30EAE27_sweep_20260818_171025",
-   "4QAM_30EAE27_sweep_20260820_160731",
    "4QAM_30EAE34_sweep_20260803_120749",
-   "4QAM_30EAE34_sweep_20260819_174145",
    "4QAM_30EAE3E_sweep_20260821_140052",
    "4QAM_30EAE54_sweep_20260818_224228",
-   "4QAM_30EAE54_sweep_20260820_170820",
    "4QAM_30EAE76_sweep_20260727_175730",
-   "4QAM_30EAE76_sweep_20260821_094629",
    "4QAM_30ECB66_sweep_20260727_121405",
-   "4QAM_30ECB66_sweep_20260820_215437",
    "4QAM_30ECB67_sweep_20260727_145926",
-   "4QAM_30ECB67_sweep_20260821_110302",
    "4QAM_30ECB6B_sweep_20260818_152456",
    "4QAM_30ECB71_sweep_20260803_143905",
-   "4QAM_30ECB71_sweep_20260820_182712",
    "4QAM_30ECB80_sweep_20260724_172954",
-   "4QAM_30ECB80_sweep_20260819_150700",
    "4QAM_30ECB81_sweep_20260724_113941",
-   "4QAM_30ECB81_sweep_20260820_231819",
    "4QAM_30ECB84_sweep_20260803_134013",
-   "4QAM_30ECB84_sweep_20260821_004711",
    "4QAM_30ECB8A_sweep_20260728_153755",
    "4QAM_30ECBAD_sweep_20260819_185744",
-   "4QAM_30ECBAD_sweep_20260820_151632",
    "4QAM_30ECBBC_sweep_20260724_134603",
-   "4QAM_30ECBBC_sweep_20260821_124646",
-   "4QAM_30ECBC5_sweep_20260727_160023",
-   "4QAM_30ECBC5_sweep_20260820_201720"
+   "4QAM_30ECBC5_sweep_20260727_160023"
   ],
-  "runs_per_config": [
-   5,
-   45,
-   85
+  "runs": [
+   10,
+   30,
+   50,
+   70,
+   90
   ],
-  "date": "2026-09-26"
+  "note": "July training sessions only"
  },
  "configs": {
   "77_433": {
    "amps_rad": [
-    0.004590265359258929,
-    0.001211958296335348
+    0.004421639344512142,
+    0.001181449940387157
    ],
    "amps_deg": [
-    0.263,
-    0.0694
+    0.2533,
+    0.0677
    ],
    "phases_rad": [
-    -1.70781,
-    -2.61052
+    -1.71475,
+    -2.60975
    ],
    "statistic": "median amplitude, circular-mean phase"
   },
   "89_433": {
    "amps_rad": [
-    0.004698258806833858,
-    0.0012350509321015966
+    0.0046029936274610515,
+    0.001200767124100156
    ],
    "amps_deg": [
-    0.2692,
-    0.0708
+    0.2637,
+    0.0688
    ],
    "phases_rad": [
-    -1.70254,
-    -2.5813
+    -1.70693,
+    -2.59912
    ],
    "statistic": "median amplitude, circular-mean phase"
   },
   "77_915": {
    "amps_rad": [
-    0.009644786501399154,
-    0.002167872463857875
+    0.009141170882912747,
+    0.0020397377259061874
    ],
    "amps_deg": [
-    0.5526,
-    0.1242
+    0.5238,
+    0.1169
    ],
    "phases_rad": [
-    -1.77312,
-    -2.72686
+    -1.78338,
+    -2.73653
    ],
    "statistic": "median amplitude, circular-mean phase"
   },
   "89_915": {
    "amps_rad": [
-    0.00981828726422084,
-    0.002224096807880666
+    0.00942568896632923,
+    0.0021562641368324696
    ],
    "amps_deg": [
-    0.5625,
-    0.1274
+    0.5401,
+    0.1235
    ],
    "phases_rad": [
-    -1.7656,
-    -2.72034
+    -1.77142,
+    -2.72582
    ],
    "statistic": "median amplitude, circular-mean phase"
   },
   "77_2400": {
    "amps_rad": [
-    0.024777802737697828,
-    0.004828713266237601
+    0.023385688735095445,
+    0.004460320832365149
    ],
    "amps_deg": [
-    1.4197,
-    0.2767
+    1.3399,
+    0.2556
    ],
    "phases_rad": [
-    -1.83285,
-    -2.7605
+    -1.85295,
+    -2.75664
    ],
    "statistic": "median amplitude, circular-mean phase"
   },
   "89_2400": {
    "amps_rad": [
-    0.02552097757672087,
-    0.005015425434528399
+    0.024540447850036732,
+    0.0048159368929100894
    ],
    "amps_deg": [
-    1.4622,
-    0.2874
+    1.4061,
+    0.2759
    ],
    "phases_rad": [
-    -1.81785,
-    -2.74312
+    -1.82435,
+    -2.73743
    ],
    "statistic": "median amplitude, circular-mean phase"
   }

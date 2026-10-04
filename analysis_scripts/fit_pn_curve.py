@@ -231,12 +231,18 @@ def predict(op, levels):
 # ── targets and the solve ───────────────────────────────────────────────────
 
 def load_spectra(path):
-    """Mean excess (tangential - radial) spectrum over the runs of one file."""
+    """MEDIAN excess (tangential - radial) spectrum over the runs of one file.
+
+    Median, not mean (2026-10-04): one broken run measurement moves a mean of
+    six. 30BF779/89_2400 run 100 read 30 deg^2 against 1.5-1.7 for the other
+    five (18x), which put that curve ~3x too high in variance; 30ECB71/89_433
+    run 60 read 3.3x. The direct extractor reads both runs normally, and no
+    other profile has a run above 2x its median."""
     d = json.loads(Path(path).read_text())
     f = np.array(d['f'])
-    ex = np.mean([np.array(r['tang']) - np.array(r['rad']) for r in d['runs']], axis=0)
-    rad = np.mean([np.array(r['rad']) for r in d['runs']], axis=0)
-    return dict(f=f, excess=ex, rad=rad, var=float(np.mean([r['var_excess'] for r in d['runs']])),
+    ex = np.median([np.array(r['tang']) - np.array(r['rad']) for r in d['runs']], axis=0)
+    rad = np.median([np.array(r['rad']) for r in d['runs']], axis=0)
+    return dict(f=f, excess=ex, rad=rad, var=float(np.median([r['var_excess'] for r in d['runs']])),
                 n_runs=len(d['runs']), n_bursts=int(d['runs'][0]['n_bursts']),
                 despur=bool(d.get('despur')))
 
