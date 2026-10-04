@@ -347,7 +347,7 @@ PA_MOD_FILE = Path(_os_sh.environ.get(
 PA_MOD_FORMAT = 1
 # what the modulation acts on, '+'-joined: 'data' (the data portion's complex
 # gain step) and/or 'b' (the cubic, data portion only). Default both.
-_PA_MOD_MODE = set(_os_sh.environ.get("SG_PA_MOD_MODE", "data+b").split("+"))
+_PA_MOD_MODE = set(_os_sh.environ.get("SG_PA_MOD_MODE", "data+b+taps").split("+"))
 
 
 # ── TX LO leakage and precise CFO, per run (default; --old-leakage) ──────────
@@ -373,8 +373,16 @@ def _pa_mod_params(cfg_dir):
     if d is None:
         return None
     c = d["configs"].get(cfg_dir)
-    return None if c is None else {"freq_hz": float(c["freq_hz"]), "amp": float(c["amp"]),
-                                   "b_amp": float(c.get("b_amp", 0.0))}
+    if c is None:
+        return None
+    out = {"freq_hz": float(c["freq_hz"]), "amp": float(c["amp"]),
+           "b_amp": float(c.get("b_amp", 0.0))}
+    if "phase_rad" in c:             # measured start phase (measure_pa_mod_phase.py)
+        out.update(phase_rad=float(c["phase_rad"]), phase_sd_rad=float(c["phase_sd_rad"]))
+    if "tap_swing" in c:             # measured swing of the taps and the cubic (measure_pa_mod_cubic.py)
+        out.update(tap_swing=c["tap_swing"]["c"], tap_swing_lags=c["tap_swing"]["lags"],
+                   b_swing=c["tap_swing"]["b_swing_measured"])
+    return out
 
 
 def _rx_spur_params(cfg_dir):
@@ -590,7 +598,8 @@ def profile_from_log(radio, config="77_433", radial_filler=False,
                      cubic_preamble=False, pa_clean=True, pa_mod=True,
                      old_leakage=False, fingerprint_only=True,
                      pa_gate_2400=False, snr_drop_db=None, full_transient=False,
-                     raw_taps=False, bb60_passband=False):
+                     raw_taps=False, bb60_passband=False, random_pa_mod_phase=False,
+                     old_pa_mod_swing=False):
     """Device profile + variation spec for one radio/config.
 
     Run-level values come from the characterisation log, waveform-level fits
@@ -820,6 +829,10 @@ def profile_from_log(radio, config="77_433", radial_filler=False,
         # gain-89 PA modulation; pa_clean records which PA coefficients are in use
         "pa_mod": _pa_mod,
         "pa_mod_enabled": bool(pa_mod) and _pa_mod is not None,
+        # the modulation also swings the ISI taps, and the cubic swing has its
+        # measured direction (--old-pa-mod-swing: cubic only, in phase)
+        "pa_mod_swing": (bool(pa_mod) and _pa_mod is not None and "tap_swing" in _pa_mod
+                         and not old_pa_mod_swing),
         "pa_clean": bool(pa_clean),
         # centre for the case where the clock is not derived from ref_ppm
         "clock_mismatch_ppm": float(clk_ppm.mean()),
@@ -869,6 +882,10 @@ def profile_from_log(radio, config="77_433", radial_filler=False,
         var["transient_level_deg"] = {"kind": "fixed"}
     if _ib is not None:
         var["isi_shift_khz"] = {"kind": "fixed"}
+    # gain-89 PA modulation: start phase at the measured fleet value, drawn per run
+    if prof["pa_mod_enabled"] and "phase_rad" in _pa_mod and not random_pa_mod_phase:
+        prof["pa_mod_phase_rad"] = _pa_mod["phase_rad"]
+        var["pa_mod_phase_rad"] = {"kind": "gauss", "sd": _pa_mod["phase_sd_rad"]}
     # oscillator spread from the clock mismatch, the less noisy of the two estimators
     var["ref_ppm"].update(sd=float(clk_ppm.std()), phi=phi)
     var["iq_amp_db"].update(sd=float(col("iq_amp_db").std()))
@@ -1047,8 +1064,13 @@ def _pa(x, pa):
                                norm_slice=slice(DATA_START, DATA_END))
 
 
-def synth_run(prof, var, rng, state, n_bursts, data_symbols=None):
+def synth_run(prof, var, rng, state, n_bursts, data_symbols=None, first_burst=0):
     """One run: draw its parameters, then build the burst train.
+
+    first_burst (optional): generate bursts first_burst ... first_burst+n_bursts-1
+    of a longer run, so the time-dependent parts (the gain-89 PA modulation, the
+    CFO and leakage phase) are where they would be that far into the run; the
+    sampling grid stays relative to the first generated burst. 0 = run start.
 
     data_symbols (optional): the run's N_DATA QPSK symbols, e.g. from a real
     TX file. The random draw still happens, so every other draw is unchanged.
@@ -1071,7 +1093,7 @@ def synth_run(prof, var, rng, state, n_bursts, data_symbols=None):
     """
     p = {}
     for k, spec in var.items():
-        if k == "isi_taps":
+        if k in ("isi_taps", "pa_mod_phase_rad"):     # drawn below, from their own streams
             continue
         p[k], state[k] = draw(spec, prof.get(k, 0.0), rng, state.get(k))
     p["cp0_samp"] = (p["cp0_samp"] + 0.5) % 1.0 - 0.5      # cyclic
@@ -1158,10 +1180,17 @@ def synth_run(prof, var, rng, state, n_bursts, data_symbols=None):
     # Continuous phase noise (default): one draw for the whole run at symbol
     # rate, from a child generator so no other draw moves.
     _pn_run = None
-    # PA modulation phase: one per run, also from a child generator
-    _pa_mod_phase = (float(_child_rng(np.random.default_rng(
-        _child_rng(rng).integers(2**63))).uniform(0, 2 * np.pi))
-        if prof.get("pa_mod_enabled") else None)
+    # PA modulation phase at the run's first burst, one per run from a child
+    # generator: the measured start phase (variation spec 'pa_mod_phase_rad'),
+    # or uniform without it (--random-pa-mod-phase, or no measurement)
+    _pa_mod_phase = None
+    if prof.get("pa_mod_enabled"):
+        _crng = _child_rng(np.random.default_rng(_child_rng(rng).integers(2**63)))
+        if var.get("pa_mod_phase_rad"):
+            _pa_mod_phase = draw(var["pa_mod_phase_rad"], prof["pa_mod_phase_rad"], _crng)[0]
+        else:
+            _pa_mod_phase = float(_crng.uniform(0, 2 * np.pi))
+        p["pa_mod_phase_rad"] = _pa_mod_phase
     if prof.get("pn_continuous"):
         assert BURST_SPACING % SPS == 0, "burst slots must sit on the symbol grid"
         _slot = BURST_SPACING // SPS
@@ -1205,7 +1234,7 @@ def synth_run(prof, var, rng, state, n_bursts, data_symbols=None):
             b = b * (1 + np.interp(_x_samp, _x_sym, am))
         b = b / np.sqrt(np.mean(np.abs(b[DATA_START:DATA_END]) ** 2))
         # PA, then ISI. This burst's PA-modulation phasor, shared by both parts:
-        _rot = (np.exp(1j * (2 * np.pi * prof["pa_mod"]["freq_hz"] * j * BURST_SPACING / FS
+        _rot = (np.exp(1j * (2 * np.pi * prof["pa_mod"]["freq_hz"] * (j + first_burst) * BURST_SPACING / FS
                              + _pa_mod_phase)) if _pa_mod_phase is not None else None)
         _pa_par = {"kind": prof["pa_kind"], "b_re": p["pa_b_re"], "b_im": p["pa_b_im"],
                    "A": prof.get("pa_A", 1e6), "p": 3.0}
@@ -1216,12 +1245,22 @@ def synth_run(prof, var, rng, state, n_bursts, data_symbols=None):
             # preamble barely carries it), contributing only its shape: its mean
             # complex gain is projected out, since the gain step below already
             # carries the whole measured line
-            _db = prof["pa_mod"]["b_amp"] * _rot
+            _db = (complex(*prof["pa_mod"]["b_swing"]) if prof.get("pa_mod_swing")
+                   else prof["pa_mod"]["b_amp"]) * _rot
             _bm = _pa(_pa_in, dict(_pa_par, b_re=p["pa_b_re"] + _db.real,
                                    b_im=p["pa_b_im"] + _db.imag))[DATA_START:]
             b = b.copy()
             b[DATA_START:] = _bm * (np.vdot(_bm, b[DATA_START:]) / np.vdot(_bm, _bm))
-        b = _isi_wave(b, taps, lags)
+        if _rot is not None and prof.get("pa_mod_swing") and "taps" in _PA_MOD_MODE:
+            # the taps swing with the modulation (data portion, like the cubic):
+            # taps_j = taps + c * r_j, c measured per lag
+            _sw = dict(zip(prof["pa_mod"]["tap_swing_lags"], prof["pa_mod"]["tap_swing"]))
+            _tj = [c + complex(*_sw.get(int(d), (0.0, 0.0))) * _rot for c, d in zip(taps, lags)]
+            _bj = _isi_wave(b, _tj, lags)
+            b = _isi_wave(b, taps, lags)
+            b[DATA_START:] = _bj[DATA_START:]
+        else:
+            b = _isi_wave(b, taps, lags)
         # measured settling: after the ISI, as fit_hammerstein removed it
         if _set_phase is not None:
             b = b * _set_phase
@@ -1238,13 +1277,13 @@ def synth_run(prof, var, rng, state, n_bursts, data_symbols=None):
         # --old-leakage), phase continuous across bursts
         b = b + 10 ** (p["lo_leak_dbc"] / 20.0) * np.exp(1j * (
             p["leak_phase_rad"] + 2 * np.pi * prof.get("lo_leak_offset_hz", 0.0) / FS
-            * (np.arange(len(b)) + j * BURST_SPACING)))
+            * (np.arange(len(b)) + (j + first_burst) * BURST_SPACING)))
         # one CFO per run, phase continuous across bursts; no per-burst dither
         # (the measured per-burst scatter is mostly the estimator's floor, and
         # the slow LO wander comes from the continuous phase noise)
         b = add_cfo(b, cfo_hz / FS,
                     phase_offset=p["phi0_rad"] + 2 * np.pi * cfo_hz / FS
-                    * (j * BURST_SPACING))
+                    * ((j + first_burst) * BURST_SPACING))
         b = b + dc * np.exp(1j * p["dc_phase_rad"])
         # Accumulated clock offset: the integer part moves the burst in the
         # capture (burst positions drift with the clock, as on real captures),
@@ -1442,6 +1481,15 @@ def describe(prof, var):
         print(f"  {'pa gain mod':<18}{'':>14}   {100 * prof['pa_mod']['amp']:.2f} % at "
               f"{prof['pa_mod']['freq_hz']:+.2f} Hz (burst rate), fleet   "
               + ("INJECTED" if prof.get("pa_mod_enabled") else "off (--no-pa-mod)"))
+        if prof.get("pa_mod_enabled"):
+            _ps = var.get("pa_mod_phase_rad")
+            print(f"  {'pa mod phase':<18}{'':>14}   at the first burst: "
+                  + (f"{np.degrees(prof['pa_mod_phase_rad']):+.1f} deg, Gaussian sd "
+                     f"{np.degrees(_ps['sd']):.1f} deg (measured)" if _ps
+                     else "uniform (--random-pa-mod-phase, or not measured)"))
+            print(f"  {'pa mod swing':<18}{'':>14}   "
+                  + ("cubic and ISI taps (measured, data portion)" if prof.get("pa_mod_swing")
+                     else "cubic only, in phase (--old-pa-mod-swing, or not measured)"))
     if prof.get("pa_clean"):
         print(f"  {'pa coefficients':<18}{'':>14}   CLEAN refit (pa_clean block), "
               f"b {prof['pa_b_re']:+.4f}{prof['pa_b_im']:+.4f}j")
@@ -1539,6 +1587,13 @@ def main(argv=None):
     ap.add_argument("--gate-pa-2400", action="store_true",
                     help="the PREVIOUS 89_2400 PA: cubic gated off. Default since "
                          "2026-10-03: the clean refit's cubic is injected there")
+    ap.add_argument("--old-pa-mod-swing", action="store_true",
+                    help="the PREVIOUS gain-89 PA modulation: only the cubic swings, in phase with "
+                         "the gain step. Default since 2026-10-04: the ISI taps swing too, and the "
+                         "cubic at its measured direction (pa_gain_mod.json tap_swing)")
+    ap.add_argument("--random-pa-mod-phase", action="store_true",
+                    help="the PREVIOUS gain-89 PA modulation phase: uniform per run. Default "
+                         "since 2026-10-04: the measured start phase (pa_gain_mod.json)")
     ap.add_argument("--bb60-passband", action="store_true",
                     help="the PREVIOUS receive filter: the measured BB60 response including its "
                          "passband rise, on fits that already contain it. Default since "
@@ -1565,7 +1620,9 @@ def main(argv=None):
                                  fingerprint_only=not a.per_radio_nuisance,
                                  pa_gate_2400=a.gate_pa_2400, snr_drop_db=a.snr_drop_db,
                                  full_transient=a.full_transient, raw_taps=a.raw_taps,
-                                 bb60_passband=a.bb60_passband)
+                                 bb60_passband=a.bb60_passband,
+                                 random_pa_mod_phase=a.random_pa_mod_phase,
+                                 old_pa_mod_swing=a.old_pa_mod_swing)
     describe(prof, var)
     if a.dry_run:
         print("\n--dry-run: nothing written.")

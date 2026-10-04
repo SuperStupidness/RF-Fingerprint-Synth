@@ -45,6 +45,8 @@ python synth_dataset.py --radio 30BF7B6 --config 77_433 --runs 2 --bursts 6 --ou
 | `--full-transient` | Previous burst transient: each radio's own complex cubic. |
 | `--raw-taps` | Previous ISI: each radio's own two fitted taps. |
 | `--bb60-passband` | Previous receive filter: the measured BB60 response even where the fits already contain its passband. |
+| `--random-pa-mod-phase` | Previous gain-89 PA modulation: a uniform random start phase per run. |
+| `--old-pa-mod-swing` | Previous gain-89 PA modulation: only the PA cubic swings, the ISI taps stay fixed. |
 | `--per-burst-pn` | Previous phase-noise model: an independent draw per burst. |
 | `--cubic-preamble` | Previous burst transient: the fitted cubic extrapolated over the preamble. |
 | `--no-pa-clean` | Previous PA fit (joint least squares). |
@@ -125,7 +127,7 @@ The shipped data has 144 radio/config profiles (24 radios), so about 4,300 per-r
 | Burst-transient shape (complex cubic) | 6 |
 | Post-PA response: two fixed taps at ±1 symbol, slid in frequency by `isi_shift_khz` | 4 |
 | Preamble transient profile | 10 |
-| Gain-89 PA modulation (433 and 915 MHz) | 3 |
+| Gain-89 PA modulation (433 and 915 MHz) | 10 (rate, gain step, complex cubic swing, two complex tap swings, start phase and its spread) |
 | Leakage tone offset from the carrier | 1 per band |
 | Fleet pools: IQ imbalance, receiver DC | 3 × 101 quantiles |
 | SNR range, carrier drift, ISI shift spread | 4 |
@@ -171,7 +173,7 @@ Each parameter in the variation spec has a `kind`:
 
 ## Known limitations
 
-- **Bursts are slightly too clean.** The burst-to-burst deviation is 0.5–1 dB below real at gain 77 and 1–2.5 dB at gain 89, and the gain-89 AM/AM droop is off by 0.2–0.35 dB. At 89 / 433 MHz the real amplitude distribution is also more asymmetric than one memoryless PA cubic gives. The default's wider SNR range masks the burst-to-burst part.
+- **Bursts are slightly too clean.** The burst-to-burst deviation is 0.5–1 dB below real at gain 77 and 1–2.5 dB at gain 89, and the gain-89 AM/AM droop is off by 0.2–0.35 dB. Within a run the per-symbol spread is about 6–7 % narrower than real throughout the gain-89 modulation cycle. The default's wider SNR range masks the burst-to-burst part.
 - **In-burst frequency pull is not modelled.** While transmitting data, real radios sit about 7 ppb below their long-term frequency.
 - **Phase noise above ~200 kHz** is below the thermal noise at 2400 MHz and on some 89_433 radios, so there the curve is set by the total in-burst variance and a no-rise constraint.
 - **A few profiles carry wideband tangential noise that is not LO phase noise** (30BF7C1/89_433, and milder 30ECB71/89_915); one curve reproduces 0.82–0.90× of it.

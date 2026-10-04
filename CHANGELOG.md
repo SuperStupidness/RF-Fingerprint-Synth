@@ -4,18 +4,22 @@ Newest first. Where the default output changes, the listed flag reproduces the p
 
 ## 2026-10-04
 
-**Default output changes: the burst transient, the ISI and the receive filter.** Previous output: `--full-transient --raw-taps --bb60-passband`.
+**Default output changes: the burst transient, the ISI, the receive filter and the gain-89 PA modulation phase.** Previous output: `--full-transient --raw-taps --bb60-passband --random-pa-mod-phase --old-pa-mod-swing` (with the previous `data/`).
 
 ### Changed
 - The burst transient is one fleet shape per config scaled by a per-radio level, `transient_level_deg` (its rms phase swing over the data). It replaces each radio's six complex-cubic coefficients, which are kept in the profile as `settling_fitted`.
 - The ISI (the post-PA linear response) is one fleet response per config, slid in frequency by a per-radio `isi_shift_khz`. It replaces each radio's two complex taps, which are kept as `isi_taps_fitted`. In fingerprint mode the shift is drawn per run from a Gaussian at the fleet spread, instead of picking one of the fleet's tap sets.
 - The BB60 receive filter's passband is flattened when the data folder's fits already contain it (the fitted taps absorbed its +0.4 dB rise at 500 kHz, so it was counted twice). The measured filter is used when the fits were made with the passband divided out (`_bb60_equalised` in the ripple file).
 - **Shipped data refitted.** `data/` now holds all 24 radios, each from its first capture session only (fits and per-run measurements from the same session), fitted with the BB60 passband divided out of the captures, so the generator uses the measured receive filter. Not reproducible by a flag: the previous `data/` is in the repository history.
+- The gain-89 PA modulation starts each run at the measured phase (+33 deg at 433 MHz, -137 deg at 915 MHz, sd 27-29 deg; `phase_rad`, `phase_sd_rad` in `data/pa_gain_mod.json`), instead of a uniform random phase: on real captures it starts with the transmission. Drawn per run as the variation-spec entry `pa_mod_phase_rad`.
+- The gain-89 PA modulation also swings the ISI taps (by about 14 % of the cubic's swing, in phase with it), and the cubic swing has its measured direction (-7 deg from the gain step). Measured on all 24 training radios (`tap_swing` in `data/pa_gain_mod.json`). Within a run the per-symbol spread now follows real captures through the modulation cycle; averaged over a run nothing changes.
 - `data/fitted_blocks_30BF779_89_433.npz` and the README result figures rebuilt from the new data.
+- `synth_dataset.py` comments shortened (history moved to this file); no code change.
 
 ### Added
-- `--full-transient`, `--raw-taps`, `--bb60-passband`.
+- `--full-transient`, `--raw-taps`, `--bb60-passband`, `--random-pa-mod-phase`, `--old-pa-mod-swing`.
 - `transient_level_deg` and `isi_shift_khz` as variation-spec knobs.
+- `synth_run(..., first_burst=j0)`: generate bursts from j0 bursts into a run, so the time-dependent parts (the gain-89 PA modulation phase, the CFO and leakage phase) match that position. Default 0, unchanged output.
 - `gauss` variations take an optional absolute centre `mu`.
 
 ### Fixed

@@ -1,6 +1,6 @@
 {
  "format_version": 1,
- "what_it_is": "Per-burst complex gain modulation at gain 89 (433/915 MHz): g_j = 1 + amp * exp(j(2 pi freq_hz j / f_burst + phase)), phase random per run. Transmit-side: unchanged when the level into the BB60 drops ~20 dB (D:/gain_experiment). Fleet-common: same frequency on all 24 radios and both sessions (July/August), size within ~+-10 %. Not a fingerprint.",
+ "what_it_is": "Per-burst complex gain modulation at gain 89 (433/915 MHz): g_j = 1 + amp * exp(j(2 pi freq_hz j / f_burst + phase)), phase at the run's first burst set by phase_rad / phase_sd_rad (not random: the modulation starts with the transmission). Transmit-side: unchanged when the level into the BB60 drops ~20 dB (D:/gain_experiment). Fleet-common: same frequency on all 24 radios and both sessions (July/August), size within ~+-10 %. Not a fingerprint.",
  "measurement": "Per-burst complex gain of each burst against the run average, strongest line in +-20 Hz at the burst rate; amp = |complex amplitude| (half the peak-to-peak gain swing). July training sessions only: 24 radios x runs [2, 7].",
  "frequency_note": "Frequencies are as seen at the burst rate; a true frequency of 766.28*k + f cannot be excluded, but a per-burst gain that large rules out k != 0 averaging within a 1.3 ms burst.",
  "absent": "89_2400 and every gain-77 config: no consistent line (< 0.8 % peak-to-peak, random frequency).",
@@ -13,7 +13,31 @@
     0.04469,
     0.05343
    ],
-   "b_amp": 0.04588
+   "b_amp": 0.04588,
+   "phase_rad": 0.5722,
+   "phase_sd_rad": 0.4734,
+   "phase_n_runs": 480,
+   "tap_swing": {
+    "lags": [
+     -1,
+     1
+    ],
+    "c": [
+     [
+      0.006821,
+      -0.000878
+     ],
+     [
+      0.007034,
+      -0.001247
+     ]
+    ],
+    "b_swing_measured": [
+     0.045428,
+     -0.005576
+    ],
+    "n_radios": 24
+   }
   },
   "89_915": {
    "freq_hz": -2.388,
@@ -23,8 +47,34 @@
     0.01436,
     0.01783
    ],
-   "b_amp": 0.02097
+   "b_amp": 0.02097,
+   "phase_rad": -2.3888,
+   "phase_sd_rad": 0.5133,
+   "phase_n_runs": 480,
+   "tap_swing": {
+    "lags": [
+     -1,
+     1
+    ],
+    "c": [
+     [
+      0.003121,
+      -0.000201
+     ],
+     [
+      0.002904,
+      -0.000565
+     ]
+    ],
+    "b_swing_measured": [
+     0.020986,
+     -0.002374
+    ],
+    "n_radios": 24
+   }
   }
  },
- "b_amp_note": "b_amp = median |complex line amplitude| of the per-burst change of the cubic, from the July clean-PA model of each radio (linearised around b0), same runs."
+ "b_amp_note": "b_amp = median |complex line amplitude| of the per-burst change of the cubic, from the July clean-PA model of each radio (linearised around b0), same runs.",
+ "phase_note": "phase_rad / phase_sd_rad: start phase of the modulation at the run's first burst, circular mean / sd over the training runs (analysis_scripts/measure_pa_mod_phase.py); the generator draws it per run",
+ "tap_swing_note": "tap_swing: the ISI taps (relative to the main tap) swing with the modulation, taps_j = taps + c * r_j on the data portion, r_j the gain-step phasor; fleet median over the training radios, burst average with the BB60 passband divided out (analysis_scripts/measure_pa_mod_cubic.py fleet)"
 }
