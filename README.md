@@ -20,7 +20,7 @@ Python 3.10+ (tested on 3.13.5). The generator needs only `numpy` and `scipy`; t
 2. **`build_your_own_radio.ipynb`** — build a transmitter by hand, for sweeps, controlled fleets and stress cases.
 3. **`estimators.ipynb`** — the reverse: recover each impairment from a capture and score it against the injected truth.
 4. **`paper_figures.ipynb`** — reproduce the paper's measurement figures. Under a minute.
-5. **`wifi_reconstruction.ipynb`** — rebuild a real 802.11g capture block by block from fitted impairments (the measurement side, not the generator).
+5. **`wifi_reconstruction.ipynb`** — rebuild a real 802.11g capture block by block from fitted impairments.
 
 The figure scripts in `analysis_scripts/` also run on their own; `fig_wifi_reconstruction.py` is the one no notebook calls.
 
@@ -47,6 +47,9 @@ python synth_dataset.py --radio 30BF7B6 --config 77_433 --runs 2 --bursts 6 --ou
 | `--bb60-passband` | Previous receive filter: the measured BB60 response even where the fits already contain its passband. |
 | `--random-pa-mod-phase` | Previous gain-89 PA modulation: a uniform random start phase per run. |
 | `--old-pa-mod-swing` | Previous gain-89 PA modulation: only the PA cubic swings, the ISI taps stay fixed. |
+| `--old-pa-mod-depth` | Previous gain-89 PA modulation depth: the swing at the size of its cubic and tap projection. |
+| `--per-radio-transient` | Previous burst transient level: each radio's own, fixed. |
+| `--per-radio-pn` | Previous phase-noise curve: each radio's own. |
 | `--per-burst-pn` | Previous phase-noise model: an independent draw per burst. |
 | `--cubic-preamble` | Previous burst transient: the fitted cubic extrapolated over the preamble. |
 | `--no-pa-clean` | Previous PA fit (joint least squares). |
@@ -57,15 +60,16 @@ The opt-out flags reproduce earlier output bit for bit; [`CHANGELOG.md`](CHANGEL
 
 ### Fingerprint-only variation (default)
 
-Re-capturing the same radios weeks later showed which impairments belong to the device. Those stay per radio; the rest are drawn from the whole fleet, so a classifier trained on the output has to rely on the device.
+Impairments that keep a radio's identity when it is re-captured weeks later stay per radio. The rest are shared by the fleet or drawn from it on every run.
 
 | Per radio (fingerprint) | Drawn from the fleet each run |
 | :--- | :--- |
-| Carrier and clock offset (spread widened by the drift measured over a session) | ISI shift (`isi_shift_khz`): it follows the capture day, not the radio |
-| TX LO leakage | IQ imbalance: mostly run-to-run noise |
+| Carrier and clock offset, spread widened by the in-session drift | ISI shift (`isi_shift_khz`) |
+| TX LO leakage | IQ imbalance |
 | PA cubic | Receiver DC |
-| Phase-noise level | SNR, extended 10 dB below anything measured |
-| Burst-transient level | |
+| | SNR, down to 10 dB below the fleet's lowest |
+| | Burst-transient level (`transient_level_deg`) |
+| | Phase-noise curve: the fleet's median, the same for every radio |
 
 ### Output layout
 
@@ -78,20 +82,41 @@ out/77_433/
     capture_*_combined.*    # synthetic receive capture
 ```
 
-`ground_truth.json` lets you score an estimator against the injected value rather than against another estimator.
+`ground_truth.json` lets you score an estimator against the injected value.
 
 ## Signal chain
 
 <p align="center"><img src="figures/signal_chain.png" width="520" alt="Signal chain: transmit path (phase noise, PA, ISI, burst transient, IQ imbalance, TX leakage) then receive path (CFO, RX DC, sampling clock, AWGN, BB60 filter, ADC floor)"></p>
 
-Fitted blocks are held fixed per radio; measured blocks are redrawn each run; constant blocks belong to the receiver. The figure shows the per-radio spec (`--per-radio-nuisance`); by default the ISI taps, IQ imbalance, receiver DC and SNR come from the fleet instead (see Quickstart). Not drawn: the gain-89 PA modulation (inside the PA), the measured preamble transient (inside the burst transient), the leakage tone's small offset from the CFO, and the receiver spur (`--rx-spur`).
+Fitted blocks are held fixed per radio; measured blocks are redrawn each run; constant blocks belong to the receiver. The figure shows the per-radio spec (`--per-radio-nuisance`); by default the ISI taps, IQ imbalance, receiver DC, SNR, transient level and phase-noise curve come from the fleet instead (see Quickstart). Not drawn: the gain-89 PA modulation (inside the PA), the measured preamble transient (inside the burst transient), the leakage tone's small offset from the CFO, and the receiver spur (`--rx-spur`).
+
+### Block models
+
+In the order the generator applies them. The signal is rescaled to unit power over the data portion before the PA and again before the IQ block. "Per radio", "fleet" and "per run" refer to the default (fingerprint-only) settings.
+
+1. **Burst.** 100 preamble symbols (the same in every burst), 1000 QPSK data symbols (drawn per run) and 200 null symbols, shaped by a square-root raised-cosine pulse (β = 0.35, 10-symbol span) at 5 samples per symbol, 5 Msps.
+2. **Burst transient.** `x·g(t)` with `g(t) = 1 + L·(s₁t + s₂t² + s₃t³)`, `t` = sample index / burst length. `s₁..s₃` are complex and shared by the fleet, scaled to 1° rms phase over the data portion; `L` is the level in degrees, drawn per run. Over the preamble the measured fleet phase profile replaces the cubic.
+3. **Phase noise.** `x·exp(jφ(t))`. `φ` is one Gaussian process per run with spectrum `S_φ(f)` given at 19 frequencies from 1.5 Hz to 500 kHz (log-log interpolation), so the bursts of a run share the slow wander. One curve per config, the fleet's median.
+4. **PA.** `y = u + b·u·|u|²`, `b` complex and per radio: `Re b < 0` is compression, `Im b` is AM/PM. Used at gain 89; at gain 77 the fit does not support it and `b = 0`.
+5. **Gain-89 PA modulation** (433 and 915 MHz). A phasor `r_j = exp(j(2π·f_m·t_j + φ₀))` per burst, `t_j` the burst's start time, `f_m` = −2.15 Hz (433 MHz) or −2.39 Hz (915 MHz), `φ₀` drawn per run around the measured start phase. On the data portion of burst `j`: the cubic becomes `b + d·β·r_j`, the ISI taps `c + d·γ·r_j`, and the gain `1 + a·r_j`. `a`, `β`, `γ` and the depth `d` are measured and shared by the fleet.
+6. **ISI (linear response after the PA).** `y[n] = w[n] + Σ c_d·w[n − 5d]` over `d = −1, +1` symbols, with `c_d = A_d·exp(j2π·d·Δf·T)`, `T` = 1 µs. `A_d` is the fleet response (two complex taps per config); `Δf` is `isi_shift_khz`, drawn per run.
+7. **Band ripple.** Convolution with a 301-tap complex FIR, one per config, shared by the fleet.
+8. **IQ imbalance.** `I′ = g_I·I`, `Q′ = g_Q·(I·sin φ + Q·cos φ)`, with `g_I = 10^(a/40)`, `g_Q = 10^(−a/40)`, then rescaled to the same power. `a` is `iq_amp_db` and `φ` is `iq_phase_deg`, both drawn per run from the fleet.
+9. **TX LO leakage.** `+ 10^(ℓ/20)·exp(j(θ + 2π·f_o·t))`, added before the carrier offset, so the tone sits `f_o` from it. `ℓ` (dBc) is per radio and drawn per run; `f_o` is a fleet constant per band (−0.54, −0.60, −1.19 Hz); `θ` is uniform per run.
+10. **Carrier offset.** `×exp(j(2π·ε·f_c·t + φ))`, phase continuous across the bursts of a run. `ε` (ppm) is per radio and drawn per run.
+11. **Receiver DC.** `+ D·exp(jθ)`, `D` relative to the data-portion rms, drawn per run from the fleet.
+12. **Sampling clock.** Burst `j` is delayed by `τ₀ − ε_c·10⁻⁶·6525·j` samples (6525 = burst spacing). `ε_c` is the clock offset in ppm, tied to the carrier offset; `τ₀` is uniform in ±0.5 sample. The whole-sample part moves the burst, the rest is a 25-tap fractional-delay filter.
+13. **Noise.** Complex white Gaussian noise. `snr_db` is the data-portion power over the null-tail power (noise, leakage and DC together) after the receive filter, drawn per run.
+14. **Receiver spur** (`--rx-spur` only). `×exp(jψ(n))`, `ψ(n) = Σ a_h·sin(2π·h·n/1168 + θ_h)` over `h = 1, 2`, `n` counted from the start of the capture (4.28 kHz and its second harmonic).
+15. **Receive filter.** The measured BB60C anti-alias FIR, applied once over the whole capture.
+16. **Post-filter floor.** White noise 45 dB below the in-band noise, present only while a burst is being transmitted.
 
 | Data file | What it sets |
 | :--- | :--- |
-| `data/radio_characterisation.json` | Per-run measurements (clock, IQ, SNR, ...) that set each parameter's centre and spread: each radio's first capture session, the same session every fit comes from. |
+| `data/radio_characterisation.json` | Per-run measurements (clock, IQ, SNR, ...) that set each parameter's centre and spread. Each radio's first capture session, as for every fit. |
 | `data/isi_taps.json` | Per radio/config: ISI taps, PA cubic and burst transient. |
 | `data/srrc_ripple_per_config.json` | Common-mode band ripple, one FIR per config. |
-| `data/pn_curves.json` | Phase noise: one curve per radio/config (1.5 Hz–500 kHz), drawn as one process per run. |
+| `data/pn_curves.json` | Phase noise: one curve per radio/config (1.5 Hz–500 kHz), drawn as one process per run. By default every radio uses the fleet's median curve. |
 | `data/srrc_preamble_transient.json` | Measured burst transient over the preamble, per config. |
 | `data/pa_gain_mod.json` | Gain-89 PA modulation, fleet-wide. |
 | `data/lo_leakage.json` | TX LO leakage level and precise carrier offset, per run. |
@@ -105,41 +130,39 @@ Each fitted file records the measurements it came from and how. `rx_spur.py` est
 
 Real-valued numbers, default settings.
 
-**Per radio and config (30):**
+**Per radio and config (9):**
 
 | Block | Parameters |
 | :--- | :--- |
-| Phase-noise curve | 19 (levels at 1.5 Hz–500 kHz) |
-| Burst-transient level (`transient_level_deg`) | 1 |
-| ISI shift `isi_shift_khz` (drawn from the fleet by default) | 1 |
 | PA cubic *b* (complex) | 2 |
 | Carrier offset: centre and run-to-run spread | 2 |
 | Clock offset from the carrier offset | 1 |
 | TX LO leakage: centre, spread, bounds | 4 (8 where a two-state mixture is used) |
 
-The shipped data has 144 radio/config profiles (24 radios), so about 4,300 per-radio numbers.
+The shipped data has 144 radio/config profiles (24 radios), so about 1,300 per-radio numbers. `--per-radio-pn`, `--per-radio-transient` and `--per-radio-nuisance` add each radio's own phase-noise curve (19), transient level (1) and ISI shift (1).
 
 **Shared by all radios, per config:**
 
 | Block | Parameters |
 | :--- | :--- |
 | Band ripple | 48 (24 complex frequency bins, applied as a 301-tap FIR) |
-| Burst-transient shape (complex cubic) | 6 |
+| Phase-noise curve (fleet median) | 19 (levels at 1.5 Hz–500 kHz) |
+| Burst-transient shape (complex cubic), and the level's mean and spread | 6 + 2 |
 | Post-PA response: two fixed taps at ±1 symbol, slid in frequency by `isi_shift_khz` | 4 |
 | Preamble transient profile | 10 |
-| Gain-89 PA modulation (433 and 915 MHz) | 10 (rate, gain step, complex cubic swing, two complex tap swings, start phase and its spread) |
+| Gain-89 PA modulation (433 and 915 MHz) | 11 (rate, gain step, complex cubic swing, two complex tap swings, swing depth, start phase and its spread) |
 | Leakage tone offset from the carrier | 1 per band |
 | Fleet pools: IQ imbalance, receiver DC | 3 × 101 quantiles |
 | SNR range, carrier drift, ISI shift spread | 4 |
 | Receiver spur (`--rx-spur` only) | 4 |
 
-The BB60C anti-alias filter is a measured response of the receiver, not fitted to any radio.
+The BB60C anti-alias filter is a measured receiver response.
 
 With `--per-radio-nuisance`, each radio/config also carries its own IQ imbalance (4), SNR (2), receiver DC (1) and carrier-offset memory (1), while the fleet pools and SNR range are not used.
 
 ## Results
 
-One radio, 30BF7B6, in all six configurations: a real capture from the session its fits come from, against the generator's output for that radio (`--per-radio-nuisance`, so SNR and the other nuisance terms are the radio's own), demodulated the same way. The real capture has the receiver spur removed, since the generator leaves it out by default.
+One radio, 30BF7B6, in all six configurations: a real capture from the session its fits come from, against the generator's output for that radio (`--per-radio-nuisance`, so SNR and the other nuisance terms are the radio's own), demodulated the same way, with the receiver spur removed from the real capture.
 
 **Spectrum.** The in-band shape, the noise floor and, at gain 89 (433 and 915 MHz), the PA's spectral regrowth all line up.
 
@@ -173,13 +196,13 @@ Each parameter in the variation spec has a `kind`:
 
 ## Known limitations
 
-- **Bursts are slightly too clean.** The burst-to-burst deviation is 0.5–1 dB below real at gain 77 and 1–2.5 dB at gain 89, and the gain-89 AM/AM droop is off by 0.2–0.35 dB. Within a run the per-symbol spread is about 6–7 % narrower than real throughout the gain-89 modulation cycle. The default's wider SNR range masks the burst-to-burst part.
+- **Bursts are slightly too clean.** The burst-to-burst deviation is 0.5–1 dB below real at gain 77 and 1–2.5 dB at gain 89, and the gain-89 AM/AM droop is off by 0.2–0.35 dB. Within a run the per-symbol spread is about 8–9 % narrower than real throughout the gain-89 modulation cycle. The default's wider SNR range masks the burst-to-burst part.
 - **In-burst frequency pull is not modelled.** While transmitting data, real radios sit about 7 ppb below their long-term frequency.
 - **Phase noise above ~200 kHz** is below the thermal noise at 2400 MHz and on some 89_433 radios, so there the curve is set by the total in-burst variance and a no-rise constraint.
 - **A few profiles carry wideband tangential noise that is not LO phase noise** (30BF7C1/89_433, and milder 30ECB71/89_915); one curve reproduces 0.82–0.90× of it.
 - **ISI is three fixed taps**, so amplitude states are slightly sharper than on real hardware.
 - **Two-state leakage at gain 89** is fitted as a mixture; its mechanism is unresolved.
-- **`clock_phase_mean_samp`** in the log is a wrapping artifact, not a radio property.
+- **`clock_phase_mean_samp`** in the log is a wrapping artifact.
 
 ## Bundled library
 

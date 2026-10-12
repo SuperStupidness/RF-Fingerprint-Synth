@@ -230,6 +230,26 @@ def _transient_level(settling, shape):
     return float((np.vdot(gs, gr) / np.vdot(gs, gs)).real)
 
 
+@_ft.lru_cache(maxsize=32)
+def _transient_fleet_cached(taps_path, cfg_dir, src):
+    shape = _transient_shape_cached(taps_path, cfg_dir, src)
+    if shape is None:
+        return None
+    lv = []
+    for k, tp in json.loads(Path(taps_path).read_text()).items():
+        b = tp.get(src) if src else tp
+        if k.endswith(f"/{cfg_dir}") and isinstance(b, dict) and b.get("settling"):
+            lv.append(_transient_level(b["settling"], shape))
+    return float(np.mean(lv)), float(np.std(lv, ddof=1))
+
+
+def _transient_fleet(cfg_dir, src):
+    """(mean, sd) of the transient level over the fleet (deg). The level does not
+    follow the radio from one capture session to the next (r ~ 0 across sessions,
+    generalisation_work/session_drift.py), so fingerprint-only draws it per run."""
+    return _transient_fleet_cached(str(TAPS), cfg_dir, src)
+
+
 ISI_LAGS = [-1, 1]
 
 
@@ -313,6 +333,18 @@ def _pn_curve(radio, cfg_dir):
     return [list(map(float, p)) for p in c["curve"]]
 
 
+def _pn_fleet_curve(cfg_dir):
+    """The fleet's pointwise median phase-noise curve for this config. Fingerprint-only
+    uses it for every radio: below ~20 kHz the radios' in-burst phase is alike, and
+    networks trained with per-radio curves and with this one score the same on real
+    captures (2026-10-09), so the per-radio curve is not a usable fingerprint."""
+    curves = _pn_curve(None, cfg_dir)
+    if not curves:
+        return None
+    f = [p[0] for p in sorted(curves[0])]
+    return [[fi, float(np.median([_curve_at(c, fi) for c in curves]))] for fi in f]
+
+
 def _curve_at(curve, f):
     m = sorted(curve)
     return float(np.interp(np.log10(f), np.log10([p[0] for p in m]), [p[1] for p in m]))
@@ -381,7 +413,8 @@ def _pa_mod_params(cfg_dir):
         out.update(phase_rad=float(c["phase_rad"]), phase_sd_rad=float(c["phase_sd_rad"]))
     if "tap_swing" in c:             # measured swing of the taps and the cubic (measure_pa_mod_cubic.py)
         out.update(tap_swing=c["tap_swing"]["c"], tap_swing_lags=c["tap_swing"]["lags"],
-                   b_swing=c["tap_swing"]["b_swing_measured"])
+                   b_swing=c["tap_swing"]["b_swing_measured"],
+                   depth_scale=float(c["tap_swing"].get("depth_scale", 1.0)))
     return out
 
 
@@ -599,7 +632,8 @@ def profile_from_log(radio, config="77_433", radial_filler=False,
                      old_leakage=False, fingerprint_only=True,
                      pa_gate_2400=False, snr_drop_db=None, full_transient=False,
                      raw_taps=False, bb60_passband=False, random_pa_mod_phase=False,
-                     old_pa_mod_swing=False):
+                     old_pa_mod_swing=False, old_pa_mod_depth=False, per_radio_transient=False,
+                     per_radio_pn=False):
     """Device profile + variation spec for one radio/config.
 
     Run-level values come from the characterisation log, waveform-level fits
@@ -766,8 +800,20 @@ def profile_from_log(radio, config="77_433", radial_filler=False,
         _curve = shift_pn_curve(_curve, float(np.mean(
             [_curve_at(c, 1e4) for c in _pn_curve(None, cfg_dir)]))
             - _curve_at(_curve, 1e4))
+    _curve_fitted = None
+    if _curve is not None and fingerprint_only and not per_radio_pn:
+        _curve_fitted, _curve = _curve, _pn_fleet_curve(cfg_dir)
     _rx_spur = _rx_spur_params(cfg_dir)
     _pa_mod = _pa_mod_params(cfg_dir)
+    # swing depth (measure_pa_mod_depth.py): the measured direction scaled to the size of
+    # the whole real swing; --old-pa-mod-depth = the direction's own size
+    if _pa_mod is not None and "tap_swing" in _pa_mod:
+        if old_pa_mod_depth:
+            _pa_mod["depth_scale"] = 1.0
+        _k = _pa_mod["depth_scale"]
+        if _k != 1.0:
+            _pa_mod["b_swing"] = [v * _k for v in _pa_mod["b_swing"]]
+            _pa_mod["tap_swing"] = [[v * _k for v in c] for c in _pa_mod["tap_swing"]]
     if rx_spur and _rx_spur is None:
         raise SystemExit(f"--rx-spur requested but {RX_SPUR_FILE.name} has no "
                          f"entry for {cfg_dir}")
@@ -822,6 +868,7 @@ def profile_from_log(radio, config="77_433", radial_filler=False,
         "pn_radial_pct_fitted": float(tp.get("extra_radial_pct", 0.0)),
         # the default model: one continuous curve per run (PN_CURVES_FILE)
         "pn_curve": _curve,
+        "pn_curve_fitted": _curve_fitted,      # the radio's own curve, when the fleet curve is in use
         "pn_continuous": bool(continuous_pn),
         # receiver spur: loaded so --dry-run shows it, applied only if enabled
         "rx_spur": _rx_spur,
@@ -846,6 +893,7 @@ def profile_from_log(radio, config="77_433", radial_filler=False,
         prof["settling_fitted"] = prof["settling"]
         prof["transient_shape"] = [[c.real, c.imag] for c in _ts]
         prof["transient_level_deg"] = _transient_level(prof["settling"], _ts)
+        prof["transient_fleet"] = _transient_fleet(cfg_dir, "ripple_fit" if _rip is not None else "")
         prof["settling"] = [[prof["transient_level_deg"] * c.real,
                              prof["transient_level_deg"] * c.imag] for c in _ts]
 
@@ -908,7 +956,8 @@ def profile_from_log(radio, config="77_433", radial_filler=False,
         _src = ("pa_clean" if pa_clean else "ripple_fit" if _rip is not None
                 else "hammerstein" if _hamm else None)
         _fleet_nuisance(prof, var, log, cfg_dir, _src,
-                        FP_SNR_DROP_DB if snr_drop_db is None else snr_drop_db)
+                        FP_SNR_DROP_DB if snr_drop_db is None else snr_drop_db,
+                        per_radio_transient)
     return prof, var
 
 
@@ -942,12 +991,14 @@ def _cfo_drift_ppm(log):
     return _cfo_drift_ppm_cached(str(LOG), str(LEAK_FILE))
 
 
-def _fleet_nuisance(prof, var, log, cfg_dir, taps_src, snr_drop_db):
+def _fleet_nuisance(prof, var, log, cfg_dir, taps_src, snr_drop_db, per_radio_transient=False):
     """Fingerprint-only variation (default; --per-radio-nuisance turns it off).
 
     Device-fixed impairments stay per radio: CFO / clock, TX LO leakage, PA
-    cubic, phase-noise level, transient level. The rest are drawn from the
-    whole fleet each run, so they cannot identify a radio:
+    cubic, phase-noise level. The rest are drawn from the whole fleet each
+    run, so they cannot identify a radio:
+      transient_level_deg  Gaussian at the fleet mean and spread (it follows the
+                      capture session); --per-radio-transient keeps the radio's own
       isi_shift_khz   Gaussian at the fleet spread (it follows the capture
                       day); with --raw-taps, one of the fleet's tap sets
       iq_amp/phase    the fleet's per-run values (mostly run noise)
@@ -967,6 +1018,9 @@ def _fleet_nuisance(prof, var, log, cfg_dir, taps_src, snr_drop_db):
     s = np.array([v["snr_mean_db"] for v in rows if v.get("snr_mean_db") is not None], float)
     var["snr_db"] = {"kind": "uniform", "lo": float(np.percentile(s, 10) - snr_drop_db),
                      "hi": float(np.percentile(s, 90))}
+    if prof.get("transient_fleet") and not per_radio_transient:
+        m, sd = prof["transient_fleet"]
+        var["transient_level_deg"] = {"kind": "gauss", "mu": m, "sd": sd, "lo": 0.0}
     _drift = _cfo_drift_ppm(log)
     if _drift is not None:
         var["ref_ppm"]["sd"] = float(np.hypot(var["ref_ppm"]["sd"], _drift))
@@ -1488,7 +1542,7 @@ def describe(prof, var):
                      f"{np.degrees(_ps['sd']):.1f} deg (measured)" if _ps
                      else "uniform (--random-pa-mod-phase, or not measured)"))
             print(f"  {'pa mod swing':<18}{'':>14}   "
-                  + ("cubic and ISI taps (measured, data portion)" if prof.get("pa_mod_swing")
+                  + (f"cubic and ISI taps (measured, data portion), depth x{prof['pa_mod'].get('depth_scale', 1.0):g}" if prof.get("pa_mod_swing")
                      else "cubic only, in phase (--old-pa-mod-swing, or not measured)"))
     if prof.get("pa_clean"):
         print(f"  {'pa coefficients':<18}{'':>14}   CLEAN refit (pa_clean block), "
@@ -1512,9 +1566,10 @@ def describe(prof, var):
               + ("   [FLEET MEAN -- per-radio level not resolvable]"
                  if prof.get("pn_level_shared") else "   [per-radio]"))
     if prof.get("pn_curve"):
-        print(f"  {'pn curve':<18}{'':>14}   S_phi dB(rad^2/Hz), slow part fleet, "
-              f"in-burst part "
-              + ("FLEET MEAN" if prof.get("pn_level_shared") else "this radio")
+        print(f"  {'pn curve':<18}{'':>14}   S_phi dB(rad^2/Hz), "
+              + ("the fleet's median curve" if prof.get("pn_curve_fitted") is not None
+                 else "slow part fleet, in-burst part "
+                 + ("FLEET MEAN" if prof.get("pn_level_shared") else "this radio"))
               + ":   " + ("USED, one continuous draw per run"
                           if prof.get("pn_continuous")
                           else "not used (--per-burst-pn)"))
@@ -1591,6 +1646,17 @@ def main(argv=None):
                     help="the PREVIOUS gain-89 PA modulation: only the cubic swings, in phase with "
                          "the gain step. Default since 2026-10-04: the ISI taps swing too, and the "
                          "cubic at its measured direction (pa_gain_mod.json tap_swing)")
+    ap.add_argument("--per-radio-pn", action="store_true",
+                    help="the PREVIOUS phase-noise curve: each radio's own. Default since 2026-10-09 "
+                         "(fingerprint-only): the fleet's median curve for the config")
+    ap.add_argument("--per-radio-transient", action="store_true",
+                    help="the PREVIOUS burst transient level: each radio's own, fixed. Default since "
+                         "2026-10-09 (fingerprint-only): drawn per run from the fleet's levels, since "
+                         "the real level does not follow the radio between capture sessions")
+    ap.add_argument("--old-pa-mod-depth", action="store_true",
+                    help="the PREVIOUS gain-89 PA modulation depth: the swing at the size of its "
+                         "projection on the cubic and taps. Default since 2026-10-04: scaled to the "
+                         "size of the whole real swing (pa_gain_mod.json tap_swing.depth_scale)")
     ap.add_argument("--random-pa-mod-phase", action="store_true",
                     help="the PREVIOUS gain-89 PA modulation phase: uniform per run. Default "
                          "since 2026-10-04: the measured start phase (pa_gain_mod.json)")
@@ -1622,7 +1688,10 @@ def main(argv=None):
                                  full_transient=a.full_transient, raw_taps=a.raw_taps,
                                  bb60_passband=a.bb60_passband,
                                  random_pa_mod_phase=a.random_pa_mod_phase,
-                                 old_pa_mod_swing=a.old_pa_mod_swing)
+                                 old_pa_mod_swing=a.old_pa_mod_swing,
+                                 old_pa_mod_depth=a.old_pa_mod_depth,
+                                 per_radio_transient=a.per_radio_transient,
+                                 per_radio_pn=a.per_radio_pn)
     describe(prof, var)
     if a.dry_run:
         print("\n--dry-run: nothing written.")

@@ -2,6 +2,22 @@
 
 Newest first. Where the default output changes, the listed flag reproduces the previous output bit for bit.
 
+## 2026-10-12
+
+**Default output changes: the gain-89 PA modulation depth, the burst transient level and the phase-noise curve.** Previous output: `--old-pa-mod-depth --per-radio-transient --per-radio-pn`.
+
+### Changed
+- The gain-89 PA modulation swing has a measured depth: x0.784 at 433 MHz, x1.099 at 915 MHz (`depth_scale` in `data/pa_gain_mod.json`). The regrowth of each burst (0.75-1.6 MHz) now swings over the modulation cycle as much as real: 2.2 dB amplitude at 433 MHz, 2.0 dB at 915 MHz. Measured on July runs 21-25; on runs 26-30 the model is within 4 % of real. Only about 45 % of the real swing is cubic-shaped; the rest is not modelled.
+- In fingerprint-only mode the burst-transient level is drawn every run from a Gaussian at the fleet's mean and spread (0.277 +- 0.013 deg at 89_433, 1.95 +- 0.12 deg at 89_2400). A radio's level does not carry over from one capture session to the next, so it is no fingerprint. Training on synthetic data with the level fixed per radio and with it set to the fleet value scored the same on real captures (+0.01 at 89_2400).
+- In fingerprint-only mode every radio uses the fleet's median phase-noise curve for its config; the radio's own curve is kept in the profile as `pn_curve_fitted`. Below about 20 kHz the radios' in-burst phase is alike, and training with per-radio curves and with the fleet curve scored the same on real captures.
+- Per-radio parameters drop from 30 to 9 per radio and config.
+- The README result figures, the fitted-blocks figure and `data/fitted_blocks_30BF779_89_433.npz` rebuilt at the new depth. Full chain: 97 % of the real amplitude spread and 94 % of the phase spread (was 96 % and 95 %).
+- Notebook and README prose shortened.
+
+### Added
+- `--old-pa-mod-depth`, `--per-radio-transient`, `--per-radio-pn`.
+- README: the model of each block, in the order the generator applies them.
+
 ## 2026-10-04
 
 **Default output changes: the burst transient, the ISI, the receive filter and the gain-89 PA modulation phase.** Previous output: `--full-transient --raw-taps --bb60-passband --random-pa-mod-phase --old-pa-mod-swing` (with the previous `data/`).

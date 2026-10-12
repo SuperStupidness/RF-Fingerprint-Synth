@@ -36,7 +36,18 @@
      0.045428,
      -0.005576
     ],
-    "n_radios": 24
+    "n_radios": 24,
+    "depth_scale": 0.784,
+    "runs": [
+     21,
+     25
+    ],
+    "depth_scale_p10_p90": [
+     0.746,
+     0.88
+    ],
+    "regrowth_swing_db_real": 2.173,
+    "regrowth_swing_db_model_depth1": 2.767
    }
   },
   "89_915": {
@@ -70,11 +81,23 @@
      0.020986,
      -0.002374
     ],
-    "n_radios": 24
+    "n_radios": 24,
+    "depth_scale": 1.099,
+    "runs": [
+     21,
+     25
+    ],
+    "depth_scale_p10_p90": [
+     0.993,
+     1.164
+    ],
+    "regrowth_swing_db_real": 2.01,
+    "regrowth_swing_db_model_depth1": 1.84
    }
   }
  },
  "b_amp_note": "b_amp = median |complex line amplitude| of the per-burst change of the cubic, from the July clean-PA model of each radio (linearised around b0), same runs.",
  "phase_note": "phase_rad / phase_sd_rad: start phase of the modulation at the run's first burst, circular mean / sd over the training runs (analysis_scripts/measure_pa_mod_phase.py); the generator draws it per run",
- "tap_swing_note": "tap_swing: the ISI taps (relative to the main tap) swing with the modulation, taps_j = taps + c * r_j on the data portion, r_j the gain-step phasor; fleet median over the training radios, burst average with the BB60 passband divided out (analysis_scripts/measure_pa_mod_cubic.py fleet)"
+ "tap_swing_note": "tap_swing: the ISI taps (relative to the main tap) swing with the modulation, taps_j = taps + c * r_j on the data portion, r_j the gain-step phasor; fleet median over the training radios, burst average with the BB60 passband divided out (analysis_scripts/measure_pa_mod_cubic.py fleet)",
+ "depth_note": "tap_swing.depth_scale scales the measured swing direction (b_swing_measured, c) so the regrowth of each burst swings over the modulation cycle as much as real (sinusoid amplitude of the 0.75-1.6 MHz regrowth level at freq_hz, real vs generator, July runs 21-25, fleet median; analysis_scripts/measure_pa_mod_depth.py). --old-pa-mod-depth ignores it."
 }
